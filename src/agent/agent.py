@@ -54,7 +54,7 @@ def eval_code(code: str, context: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 llm = ChatOpenAI(
     openai_api_base="https://openrouter.ai/api/v1",
     openai_api_key=os.getenv("OPENROUTER_API_KEY"),
-    model="google/gemini-2.5-pro",
+    model="ibm-granite/granite-4.0-h-micro",
     streaming=False, max_completion_tokens=20000, request_timeout=600, seed=420
 )
 
