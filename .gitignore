@@ -902,3 +902,5 @@ scratch/
 outputs/
 draft.ipynb
 uv.lock
+
+.mcp.json
