@@ -9,7 +9,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 import streamlit as st
-from src.agent.agent import get_agent_executor, _prepare_prompt
+from src.agent.agent import get_agent_executor, _prepare_initial_state
 
 st.set_page_config(page_title="LLM Agent Demo", layout="wide")
 st.title("adsKRK")
@@ -73,7 +73,11 @@ if run_button:
             tmp_file_path = tmp_file.name
         
         try:
-            prompt = _prepare_prompt(smiles=smiles_input, slab_path=tmp_file_path, user_request=user_query)
+            initial_state = _prepare_initial_state(
+                smiles=smiles_input, 
+                slab_path=tmp_file_path, 
+                user_request=user_query
+            )
             
             st.session_state.messages.append({"role": "user", "content": f"**Inputs provided:**\n- SMILES: `{smiles_input}`\n- Slab file: `{xyz_file.name}`\n- Query: `{user_query}`\n\n**Generated prompt for the agent...**"})
             with st.chat_message("user"):
@@ -82,12 +86,28 @@ if run_button:
             with st.chat_message("assistant"):
                 final_answer = ""
                 with st.status("Thinking...", expanded=True) as status:
+                    MAX_STEPS = int(os.environ.get("AGENT_MAX_STEPS", "20"))
+                    step_count = 0
+                    recent_messages = []
+                    recent_tool_calls = []
+
                     for event in agent_executor.stream(
-                        {"messages": [("user", prompt)]},
+                        initial_state,
                         stream_mode="values",
                     ):
+                        step_count += 1
+                        if step_count >= MAX_STEPS:
+                            status.markdown("⚠️ **WARNING: Reached maximum step limit. Terminating to prevent infinite loop.**")
+                            break
                         if "tool_calls" in event:
                             for tc in event["tool_calls"]:
+                                tool_sig = f"{tc['name']}:{str(tc['args'])}"
+                                # Check for repeated tool calls
+                                if recent_tool_calls.count(tool_sig) >= 3:
+                                    status.markdown("⚠️ **WARNING: Detected repeated tool calls. Possible loop.**")
+                                recent_tool_calls.append(tool_sig)
+                                if len(recent_tool_calls) > 10:
+                                    recent_tool_calls.pop(0)
                                 status.markdown(f"Calling tool: `{tc['name']}` with args: `{tc['args']}`")
                             status.divider()
                         if "tool_output" in event:
@@ -98,6 +118,11 @@ if run_button:
                             last_message = event["messages"][-1]
                             if last_message.type == "ai" and last_message.content:
                                 content = last_message.content
+                                if content in recent_messages:
+                                    status.markdown("⚠️ **WARNING: Detected repeated message content.**")
+                                recent_messages.append(content)
+                                if len(recent_messages) > 5:
+                                    recent_messages.pop(0)
                                 render_message_in_status(content, status)
                                 status.divider()
                                 final_answer = content

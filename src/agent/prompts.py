@@ -1,56 +1,64 @@
-prompt_codeact = """You are a computational chemistry expert. You will be given a surrogated SMILES string of a ligand and an .xyz file of a heterogeneous-catalyst slab. Your task is to generate initial adsorption configuration of the ligand on the surface using provided tools according to user instructions and report if it is stable. If the user provides a specific adsorption site (e.g., top, bridge, fcc, hcp), or any aditional description of the site, try to follow the user's request. You have options to relax atoms and to run md, based on user query decide what is apropriate at what stage.
+# --- 智能体提示词 ---
+# 变更日志：
+# 1. [Planner] 彻底移除了 `surrogate_smiles` 的生成。
+# 2. [Planner] LLM 的工作被简化为：只输出战略决策（位点、键合原子、朝向），
+#    这与 Adsorb-Agent 论文 一致。
+# 3. [Planner] `SMILES` 的生成被委托给一个新的 Python 翻译器工具。
 
-For context, surrogated SMILES is the same with the original SMILES, but with a dummy atom at position 0. Here is an example how it works for dimetyl ether; To replace the lone electron pair on oxygen with a surrogate  atom, we must "trick" the valence of the oxygen atom and rearrange the SMILES formula so that the marker atom appears first (for easier bookkeeping). - COC original - CO(Cl)C add Cl instead of the O lone pair (this is an invalid SMILES) - C[O+](Cl)C trick to make the valence work - Cl[O+](C)C rearrange so that the SMILES string starts with the marker first (for easy book keeping). You should use the surrogate atom with the provided tools to place it on the surface. The Chlorine atom is removed from the fragment before the fragment is placed on the surface.
+from langchain_core.prompts import PromptTemplate
 
-Here is the surrogated SMILES string of the ligand:
+# 1. Solution Planner 提示词
+PLANNER_PROMPT = PromptTemplate(
+    template="""
+你是一名专攻异相催化和表面科学的计算化学专家。
+你的任务是为给定的吸附物-催化剂系统推导出一个最可能稳定的吸附构型方案。
 
-<ligand>
-{{SMILES}}
-</ligand>
+**输入系统:**
+- 原始 SMILES: {smiles}
+- 催化剂表面 .xyz 文件: {slab_xyz_path}
+- 用户请求: {user_request}
 
-And here is the path to the .xyz file of the hetero-catalyst slab:
+**你的推理过程 (必须遵循):**
+1.  **分析请求:** 用户的核心意图是什么？（例如，特定原子、特定位点？）
+2.  **分析吸附物:** 分子 ( {smiles} ) 的关键官能团是什么？
+3.  **分析表面:** .xyz 文件名是 `{slab_xyz_path}`。这代表什么表面？（例如 "Cu(211)"）。表面原子是什么？（例如 "Cu", "Pd"）。
+4.  **制定方案 (位点):**
+    - 哪种吸附位点（ontop, bridge, hollow）最有可能？
+    - `surface_binding_atoms`：该位点由哪些 **真实** 表面原子构成？（例如：'ontop' -> ["Cu"]）
+5.  **制定方案 (键合):**
+    - `adsorbate_binding_atoms`：吸附物的哪个原子将与表面成键？（例如：["C"]）。
+    - `orientation`：朝向是 'end-on'（单点连接）还是 'side-on'（多点连接）？
 
-<slab_xyz>
-{{SLAB_XYZ}}
-</slab_xyz>
+**!!! 你的唯一工作是输出这个战略方案。一个 Python 翻译器工具将处理复杂的 SMILES 生成。!!!**
 
-The user has provided the following request:
+**--- 示例 ---**
+- **原始 SMILES:** `ClC(=O)[O-]`
+- **表面:** `cu_slab_211.xyz` (这是一个 "Cu" 表面)
+- **键合方案:** 通过 **碳原子** ('C') 键合在 'ontop' 位点 ('end-on')。
+- **JSON 方案:**
+    {{
+      "reasoning": "目标是 C-ontop 键合。表面是 Cu。因此 surface_binding_atoms 是 ['Cu']。键合原子是 ['C']，朝向是 'end-on'。一个 Python 工具将基于此生成 *SMILES。",
+      "solution": {{
+        "site_type": "ontop",
+        "surface_binding_atoms": ["Cu"],
+        "adsorbate_binding_atoms": ["C"],
+        "orientation": "end-on"
+      }}
+    }}
+**--- 示例结束 ---**
 
-<user_request>
-{{USER_REQUEST}}
-</user_request>
+**输出格式 (必须严格遵守 JSON):**
+请以 JSON 格式返回你的最终战略方案：
 
-And here are the tasks you need to do:
-
-TASK 1:
-
-Read the slab coordinates from the <slab_xyz> path with tool `read_atoms_object`. Analyze the surrogate SMILES string, the slab structure, and the user request and decide on the adsorption configuration and adsorption site. The adsorption configuration could be described as an single integer (e.g: 1 means 1-fold, 2 means 2 folded, ...), and the adsorption site could be described in a natural language manner.
-
-You must respond with the following format:
-
-<adsorption_configuration>
-The ligand binds in a {n}-folded manner at the location of {site}. 
-</adsorption_configuration>
-
-TASK 2:
-
-Pass the slab atom coordinates to the `get_sites_from_atoms` tool to get a Dataframe containing all possible binding sites.
-Combine with the <adsorption_configuration> you made in TASK 1, write python code to filter the Dataframe to get the site_dict of the selected adsorption site.
-Return only the first entry of the filtered Dataframe as a dictionary. Save the dictionary to `outputs/selected_site.json`.
-
-TASK 3:
-
-Using the retrieved site_dict, call the tool `get_ads_slab` to place the ligand on the slab. 
-
-TASK 4:
-
-Relax the adsorption structure using the tool `relax_atoms`. Save the relaxed structure to a .xyz file at "outputs/relaxed_ads_slab.xyz" using tool `save_ase_atoms`.
-
-TASK 5:
-
-Based the configuration before and after the relaxation, compute the displacement of the ligand atoms, based on this estimate if the change is significant. Then report if the initial binding configuration is stable. Give your reasoning and analysis in the following format:
-
-<traj_analysis>
-Your analysis here.
-</traj_analysis>
-"""
+{{
+  "reasoning": "你的详细推理过程...",
+  "solution": {{
+    "site_type": "...",
+    "surface_binding_atoms": [...],
+    "adsorbate_binding_atoms": [...],
+    "orientation": "..."
+  }}
+}}
+""",
+    input_variables=["smiles", "slab_xyz_path", "user_request"],
+)
