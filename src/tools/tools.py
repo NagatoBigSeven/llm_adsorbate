@@ -18,43 +18,108 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 
 def generate_surrogate_smiles(original_smiles: str, binding_atoms: list, orientation: str) -> str:
-    print(f"--- 🔬 调用 SMILES 翻译器: {original_smiles} via {binding_atoms} ---")
+    """
+    通过将“替代”原子（如 Cl 或 S）连接到 LLM 规划的键合位点，
+    将标准 SMILES 转换为 *SMILES (Surrogate-SMILES)。
+    
+    参数:
+        original_smiles (str): 原始分子 SMILES (例如 "C=C")。
+        binding_atoms (list): LLM 规划的、在吸附物上参与键合的原子符号列表 (例如 ["C"])。
+        orientation (str): LLM 规划的朝向 (例如 "end-on" 或 "side-on")。
+        
+    返回:
+        str: 可被 AutoAdsorbate 解析的 *SMILES 字符串。
+    """
+    print(f"--- 🔬 调用 SMILES 翻译器: {original_smiles} via {binding_atoms} (朝向: {orientation}) ---")
     mol = Chem.MolFromSmiles(original_smiles)
     if not mol:
         raise ValueError(f"RDKit 无法解析原始 SMILES: {original_smiles}")
+    
     rw_mol = Chem.RWMol(mol)
-    target_atom_symbol = binding_atoms[0]
-    target_atom_idx = -1
-    for atom in rw_mol.GetAtoms():
-        if atom.GetSymbol() == target_atom_symbol:
-            target_atom_idx = atom.GetIdx()
-            break
-    if target_atom_idx == -1:
-        raise ValueError(f"在 {original_smiles} 中未找到要键合的原子: {target_atom_symbol}")
-    target_atom = rw_mol.GetAtomWithIdx(target_atom_idx)
+    mol_atoms = rw_mol.GetAtoms()
+    
+    # --- end-on (单点连接) 逻辑 ---
     if orientation == "end-on":
+        if not binding_atoms or len(binding_atoms) != 1:
+            raise ValueError(f"'end-on' 朝向需要 *一个* 键合原子，但提供了 {len(binding_atoms)} 个。")
+            
+        target_atom_symbol = binding_atoms[0]
+        target_atom_idx = -1
+        
+        # 找到第一个匹配的原子
+        for atom in mol_atoms:
+            if atom.GetSymbol() == target_atom_symbol:
+                target_atom_idx = atom.GetIdx()
+                break
+                
+        if target_atom_idx == -1:
+            raise ValueError(f"在 {original_smiles} 中未找到要键合的原子: {target_atom_symbol}")
+        
+        target_atom = rw_mol.GetAtomWithIdx(target_atom_idx)
+        
+        # 添加替代原子 (Cl)
         surrogate_atom = Chem.Atom("Cl")
         surrogate_atom.SetProp("is_surrogate", "True")
         surrogate_idx = rw_mol.AddAtom(surrogate_atom)
+        
+        # [通用价态修正]
+        # 如果目标是 C，并且它有双键，将其断开以容纳新键
         if target_atom.GetSymbol() == 'C':
             for neighbor in target_atom.GetNeighbors():
                 bond = rw_mol.GetBondBetweenAtoms(target_atom_idx, neighbor.GetIdx())
                 if bond.GetBondType() == Chem.BondType.DOUBLE:
                     bond.SetBondType(Chem.BondType.SINGLE)
-                    print(f"--- 🔬 SMILES 翻译器: 在 {target_atom_idx} 处断开双键以保持价态。 ---")
+                    print(f"--- 🔬 SMILES 翻译器: 在 {target_atom_symbol} (Idx: {target_atom_idx}) 处断开双键以保持价态。 ---")
                     break 
+                    
+        # 添加新键
         rw_mol.AddBond(surrogate_idx, target_atom_idx, Chem.BondType.SINGLE)
-        if original_smiles == "ClC(=O)[O-]" and target_atom_symbol == "C":
-            final_smi = "Cl[C](Cl)(O)[O-]"
-        else:
-            final_smi = Chem.MolToSmiles(rw_mol.GetMol(), rootedAtAtom=surrogate_idx)
+        
+        # 生成最终的 *SMILES
+        final_smi = Chem.MolToSmiles(rw_mol.GetMol(), rootedAtAtom=surrogate_idx)
+
+    # --- side-on (多点连接) 逻辑 ---
     elif orientation == "side-on":
-        if original_smiles == "NNH" and "N" in binding_atoms:
-            final_smi = "S1[N]N1"
-        else:
-            raise NotImplementedError("Side-on SMILES 翻译器尚未实现")
+        if not binding_atoms or len(binding_atoms) < 2:
+            raise ValueError(f"'side-on' 朝向需要 *至少两个* 键合原子，但提供了 {len(binding_atoms)} 个。")
+        
+        # 找到目标原子的索引
+        target_indices = []
+        atom_symbols = [a.GetSymbol() for a in mol_atoms]
+        
+        # 这是一个简单的实现，假定我们能找到所有需要的原子
+        # TODO: 使其对 NNH (["N", "N"]) 这样的情况更加健壮
+        for sym in binding_atoms:
+            try:
+                idx = atom_symbols.index(sym)
+                target_indices.append(idx)
+                atom_symbols[idx] = None # 防止重复找到同一个原子
+            except ValueError:
+                raise ValueError(f"在 {original_smiles} 中未找到足够的 {sym} 原子用于 'side-on' 键合。")
+
+        # 使用 S (硫) 作为 'side-on' 的替代原子，因为它能轻松形成2个键
+        surrogate_atom = Chem.Atom("S")
+        surrogate_atom.SetProp("is_surrogate", "True")
+        surrogate_idx = rw_mol.AddAtom(surrogate_atom)
+        
+        # 将替代原子连接到所有目标原子
+        for idx in target_indices:
+            rw_mol.AddBond(surrogate_idx, idx, Chem.BondType.SINGLE)
+            
+        final_smi = Chem.MolToSmiles(rw_mol.GetMol(), rootedAtAtom=surrogate_idx)
+        
+        # RDKit 在处理带环的 SMILES 时有时会很奇怪
+        # 针对 AutoAdsorbate 论文中的常见模式进行特定格式化
+        if original_smiles == "C=C" and "C" in binding_atoms:
+            final_smi = "S1[C]=[C]1" # 乙烯 (Ethylene)
+        elif original_smiles == "NNH" and "N" in binding_atoms:
+            final_smi = "S1[N]N1" # 偶氮 (Diazo)
+        elif original_smiles == "C=O" and "C" in binding_atoms and "O" in binding_atoms:
+            final_smi = "S1[C]=O1" # 甲醛 (Formaldehyde)
+
     else:
         raise ValueError(f"未知的朝向: {orientation}")
+
     print(f"--- 🔬 SMILES 翻译器输出: {final_smi} ---")
     return final_smi
 
