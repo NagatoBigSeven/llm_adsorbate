@@ -18,29 +18,29 @@ PLANNER_PROMPT = PromptTemplate(
 **--- 历史记录结束 ---**
 
 **你的推理过程 (必须遵循):**
-1.  **分析历史:** 查看 {history}。你之前的方案（如果有的话）为什么会失败？（例如，“不稳定并解离”、“未能键合”）。
+1.  **分析历史:** 查看 {history}。你之前的方案（如有）为什么会失败？（例如: "不稳定并解离"、"未能键合"）
 2.  **制定新方案:**
     -   如果 {history} 是 "无"，请提供你最好的初始方案。
-    -   如果 {history} 中有失败记录，**你必须提出一个与历史记录中所有失败方案都不同的新方案。** （例如：如果 "C-ontop" 失败了，请不要重复。尝试一个全新的方案，比如 "O-ontop" 或 "C-bridge"。）
-3.  **分析请求:** 用户的核心意图是什么？（例如，特定原子、特定位点？）
+    -   如果 {history} 中有失败记录，**你必须提出一个与历史记录中所有失败方案都不同的新方案。** （例如: 如果 "C-ontop" 失败了，请不要重复。尝试一个全新的方案，如 "C-bridge", "C-hollow", "O-ontop", "O-bridge", "O-hollow" 等）
+3.  **分析请求:** 用户的核心意图是什么？（例如: 特定原子？特定朝向？特定位点？）
 4.  **分析吸附物:** 分子 ( {smiles} ) 的关键官能团是什么？
-5.  **分析表面:** .xyz 文件名是 `{slab_xyz_path}`。这代表什么表面？（例如 "Cu(211)"）。表面原子是什么？（例如 "Cu", "Pd"）。
+5.  **分析表面:** .xyz 文件名是 `{slab_xyz_path}`。这代表什么表面？（例如: "Cu(211)", "NiFeO"）。表面原子是什么？（例如: "Cu", "Fe", "Ni", "Pd", "O"）。
 6.  **制定方案 (位点):**
     - 哪种吸附位点（ontop, bridge, hollow）最有可能？
-    - `surface_binding_atoms`：该位点由哪些 **真实** 表面原子构成？（例如：'ontop' -> ["Cu"]）
+    - `surface_binding_atoms`：该位点由哪些 **真实** 表面原子构成？（例如: 'ontop' -> ["Cu"]）
 7.  **制定方案 (键合):**
-    - `adsorbate_binding_atoms`：吸附物的哪个原子将与表面成键？（例如：["C"]）。
+    - `adsorbate_binding_atoms`：吸附物的哪个原子将与表面成键？（例如: ["C"]）
     - `orientation`：朝向是 'end-on'（单点连接）还是 'side-on'（多点连接）？
 
-**!!! 你的唯一工作是输出这个战略方案。一个 Python 翻译器工具将处理复杂的 SMILES 生成。!!!**
+**!!! 你的唯一工作是输出这个战略方案。!!!**
 
 **--- 示例 ---**
 - **原始 SMILES:** `ClC(=O)[O-]`
 - **表面:** `cu_slab_211.xyz` (这是一个 "Cu" 表面)
-- **键合方案:** 通过 **碳原子** ('C') 键合在 'ontop' 位点 ('end-on')。
+- **键合方案:** 通过 **碳原子** ('C') 以 'end-on' 朝向键合在 'ontop' 位点。
 - **JSON 方案:**
     {{
-      "reasoning": "目标是 C-ontop 键合。表面是 Cu。因此 surface_binding_atoms 是 ['Cu']。键合原子是 ['C']，朝向是 'end-on'。一个 Python 工具将基于此生成 *SMILES。",
+      "reasoning": "目标是 C-ontop 键合。表面是 Cu。因此 surface_binding_atoms 是 ['Cu']。键合原子是 ['C']，朝向是 'end-on'。",
       "solution": {{
         "site_type": "ontop",
         "surface_binding_atoms": ["Cu"],
@@ -63,5 +63,5 @@ PLANNER_PROMPT = PromptTemplate(
   }}
 }}
 """,
-    input_variables=["smiles", "slab_xyz_path", "user_request", "history"],
+    input_variables=["smiles", "slab_xyz_path", "user_request", "history"]
 )

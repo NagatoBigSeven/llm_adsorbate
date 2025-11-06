@@ -257,7 +257,7 @@ def tool_executor_node(state: AgentState) -> dict:
         "analysis_json": json.dumps(analysis_json)
     }
 
-def final_analysis_node(state: AgentState) -> dict:
+def final_analyzer_node(state: AgentState) -> dict:
     """ 
     节点 5: Final Analyzer
     极度严格的失败提示词，防止幻觉。
@@ -396,7 +396,7 @@ def get_agent_executor():
     workflow.add_node("plan_validator", plan_validator_node) 
     workflow.add_node("smiles_translator", smiles_translator_node)
     workflow.add_node("tool_executor", tool_executor_node)
-    workflow.add_node("final_analyzer", final_analysis_node)
+    workflow.add_node("final_analyzer", final_analyzer_node)
     workflow.set_entry_point("planner")
     workflow.add_edge("planner", "plan_validator")
     workflow.add_edge("tool_executor", "final_analyzer")
