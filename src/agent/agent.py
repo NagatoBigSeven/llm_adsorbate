@@ -49,23 +49,28 @@ class AgentState(TypedDict):
 # --- 2. 设置环境和 LLM ---
 load_dotenv()
 
-if not os.environ.get("GOOGLE_API_KEY"):
-    raise ValueError("GOOGLE_API_KEY environment variable not set.")
-# if not os.environ.get("OPENROUTER_API_KEY"):
-#     raise ValueError("OPENROUTER_API_KEY environment variable not set.")
+# if not os.environ.get("GOOGLE_API_KEY"):
+#     raise ValueError("GOOGLE_API_KEY environment variable not set.")
+if not os.environ.get("OPENROUTER_API_KEY"):
+    raise ValueError("OPENROUTER_API_KEY environment variable not set.")
 
 def get_llm():
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro")
-    # llm = ChatOpenAI(
-    #     openai_api_base="https://openrouter.ai/api/v1",
-    #     openai_api_key=os.getenv("OPENROUTER_API_KEY"),
-    #     model="google/gemini-2.5-pro",
-    #     streaming=False, 
-    #     temperature=0.0,
+    # llm = ChatGoogleGenerativeAI(
+    #     model="gemini-2.5-pro", 
+    #     temperature=0.0, 
     #     max_tokens=4096, 
     #     timeout=120, 
-    #     seed=42
     # )
+    llm = ChatOpenAI(
+        openai_api_base="https://openrouter.ai/api/v1",
+        openai_api_key=os.getenv("OPENROUTER_API_KEY"),
+        model="google/gemini-2.5-pro",
+        streaming=False, 
+        temperature=0.0,
+        max_tokens=4096, 
+        timeout=120, 
+        seed=42
+    )
     return llm
 
 # --- 3. 定义 LangGraph 节点 (Nodes) ---

@@ -33,7 +33,13 @@ def generate_surrogate_smiles(original_smiles: str, binding_atoms: list, orienta
         str: 可被 AutoAdsorbate 解析的 *SMILES 字符串。
     """
     print(f"--- 🔬 调用 SMILES 翻译器: {original_smiles} via {binding_atoms} (朝向: {orientation}) ---")
-    mol = Chem.MolFromSmiles(original_smiles)
+    
+    sanitized_smiles = original_smiles
+    if original_smiles == "C#O":
+        sanitized_smiles = "[C-]#[O+]" # 使用化学上更准确的两性离子形式
+        print(f"--- 🔬 [FIX] 检测到无效的 'C#O'。已将其清理为 '{sanitized_smiles}'。 ---")
+    
+    mol = Chem.MolFromSmiles(sanitized_smiles)
     if not mol:
         raise ValueError(f"RDKit 无法解析原始 SMILES: {original_smiles}")
     
@@ -65,16 +71,14 @@ def generate_surrogate_smiles(original_smiles: str, binding_atoms: list, orienta
         target_atom_obj = rw_mol.GetAtomWithIdx(target_idx)
         target_atom_obj.SetFormalCharge(target_atom_obj.GetFormalCharge() + 1)
 
-        out_smiles = Chem.MolToSmiles(rw_mol.GetMol())
-        
-        # --- 后处理：确保 Cl 在最前面 ---
-        if not out_smiles.startswith("Cl"):
-            # 这是一个简单的重排，可能对复杂分子不健壮
-            parts = out_smiles.split("Cl")
-            if len(parts) == 2:
-                out_smiles = "Cl" + parts[1] + parts[0]
-            # 确保括号匹配
-            out_smiles = out_smiles.replace(")(", "")
+        if target_atom_obj.GetSymbol() == "C" and sanitized_smiles == "[C-]#[O+]":
+            # 我们将 C(-1) 变成了 C(0)。
+            # 我们附加了 Cl。
+            # 正确的、RDKit 可解析的 SMILES 是 "Cl[C]#[O+]"。
+            out_smiles = "Cl[C]#[O+]"
+        else:
+            # 对于所有其他情况，我们仍然依赖 RDKit，但 *禁用* 损坏的后处理
+            out_smiles = Chem.MolToSmiles(rw_mol.GetMol())
 
         print(f"--- 🔬 SMILES 翻译器输出: {out_smiles} ---")
         return out_smiles
@@ -85,21 +89,23 @@ def generate_surrogate_smiles(original_smiles: str, binding_atoms: list, orienta
             raise ValueError(f"'side-on' 朝向需要 *两个* 键合原子，但提供了 {len(binding_atoms)} 个。")
         
         target_indices = []
-        atom_symbols_in_mol = [a.GetSymbol() for a in mol_atoms]
         
         # 寻找匹配的原子索引
-        idx1_found = False
-        for i, symbol in enumerate(atom_symbols_in_mol):
-            if symbol == binding_atoms[0] and not idx1_found:
-                target_indices.append(mol_atoms[i].GetIdx())
-                idx1_found = True
-            elif symbol == binding_atoms[1]:
-                target_indices.append(mol_atoms[i].GetIdx())
+        idx1, idx2 = -1, -1
+        first_symbol, second_symbol = binding_atoms[0], binding_atoms[1]
+
+        for i, atom in enumerate(mol_atoms):
+            if atom.GetSymbol() == first_symbol and idx1 == -1:
+                idx1 = atom.GetIdx()
+            elif atom.GetSymbol() == second_symbol and atom.GetIdx() != idx1:
+                 idx2 = atom.GetIdx()
+                 break # 找到了两个
         
-        if len(target_indices) != 2:
+        if idx1 == -1 or idx2 == -1:
             raise ValueError(f"在 {original_smiles} 中未找到足够的键合原子 (需要 {binding_atoms})。")
-            
-        idx1, idx2 = sorted(target_indices)
+        
+        target_indices = sorted([idx1, idx2])
+        idx1, idx2 = target_indices[0], target_indices[1]
         
         # --- 破坏 C=C, C#C, N=N 等键合 ---
         bond = rw_mol.GetBondBetweenAtoms(idx1, idx2)
@@ -108,51 +114,18 @@ def generate_surrogate_smiles(original_smiles: str, binding_atoms: list, orienta
             rw_mol.RemoveBond(idx1, idx2)
             rw_mol.AddBond(idx1, idx2, Chem.rdchem.BondType.SINGLE)
         
-        # --- RDKit 化学合理性调整 ---
-        atom1 = rw_mol.GetAtomWithIdx(idx1)
-        atom2 = rw_mol.GetAtomWithIdx(idx2)
-        # S1...1 标记不需要电荷调整，因为 S 是二价的
-
-        # --- 添加 S1...S...1 标记 ---
-        # S1...1 是 autoadsorbate/README 中用于环状键合的标记
+        # --- 添加 S-S 标记 ---
         marker1_idx = rw_mol.AddAtom(Chem.Atom("S"))
         marker2_idx = rw_mol.AddAtom(Chem.Atom("S"))
         
-        # S-S 键
         rw_mol.AddBond(marker1_idx, marker2_idx, Chem.rdchem.BondType.SINGLE)
-        # S-C 键
         rw_mol.AddBond(marker1_idx, idx1, Chem.rdchem.BondType.SINGLE)
-        # S-C 键
         rw_mol.AddBond(marker2_idx, idx2, Chem.rdchem.BondType.SINGLE)
         
-        # --- 设置环信息 (S-S 键是环的一部分) ---
-        bond1 = rw_mol.GetBondBetweenAtoms(marker1_idx, marker2_idx)
-        bond1.SetBoolProp("map_num", 1) # 标记为环 1
-        bond2 = rw_mol.GetBondBetweenAtoms(marker1_idx, idx1)
-        bond2.SetBoolProp("map_num", 1) # 标记为环 1
-        bond3 = rw_mol.GetBondBetweenAtoms(idx1, idx2)
-        bond3.SetBoolProp("map_num", 1) # 标记为环 1
-        bond4 = rw_mol.GetBondBetweenAtoms(idx2, marker2_idx)
-        bond4.SetBoolProp("map_num", 1) # 标记为环 1
-
-        # RDKit 现在可以正确生成 S1...1 格式
         out_smiles = Chem.MolToSmiles(rw_mol.GetMol())
-
-        # --- 手动后处理 (作为备用) ---
-        if "S(C)S" in out_smiles:
-             out_smiles = out_smiles.replace("S(C)S", "S1S(C)C1", 1)
-
-        # 确保 S1 在最前面
-        if out_smiles.startswith("[S]1"):
-             out_smiles = "S1" + out_smiles[3:]
         
-        # RDKit 可能会将 S1S(C)C1 规范化为 S1CC1
-        if "S1S(C)C1" in out_smiles:
-             out_smiles = "S1CC1"
-        
-        final_smiles = "S1CC1" # 对于 C=C side-on，我们期望这个
-        print(f"--- 🔬 SMILES 翻译器输出: {final_smiles} ---")
-        return final_smiles # 硬编码以匹配日志
+        print(f"--- 🔬 SMILES 翻译器输出: {out_smiles} ---")
+        return out_smiles
 
     else:
         raise ValueError(f"未知的朝向: {orientation}。必须是 'end-on' 或 'side-on'。")
@@ -174,58 +147,86 @@ def read_atoms_object(slab_path: str) -> ase.Atoms:
         raise
 
 def get_fragment(SMILES: str, to_initialize: int = 1) -> Union[Fragment, ase.Atoms]:
-    """
-    从代理 SMILES 字符串 (*SMILES) 初始化 autoadsorbate.Fragment 对象。
-    参数 'SMILES' 由 agent.py 传入。
-    """
-    # --- S1CC1 的特殊处理逻辑 ---
-    if SMILES == "S1CC1":
-        print(f"--- 🛠️ get_fragment: 尝试从 SMILES 手动构建 Atoms: {SMILES} ---")
-        
-        # 1. 创建手动的 ase.Atoms
-        fragment_atoms = Atoms(['S', 'S', 'C', 'C', 'H', 'H', 'H', 'H'], 
+    INTERNAL_SMILES_MARKER = None
+    manual_conformer = None
+
+    # --- 手动构建器: C=C (Ethylene) ---
+    # RDKit SMILES: "[S]1CC1[S]"
+    if SMILES == "[S]1CC1[S]":
+        print(f"--- 🛠️ get_fragment: 检测到 Ethylene (C=C) side-on SMILES。使用手动构建器... ---")
+        INTERNAL_SMILES_MARKER = "S1S"
+        # 2x S, 2x C, 4x H
+        manual_conformer = Atoms(['S', 'S', 'C', 'C', 'H', 'H', 'H', 'H'], 
                              positions=[(0.67, 0.0, 0.0), (-0.67, 0.0, 0.0), 
                                         (0.0, 0.76, 0.0), (0.0, -0.76, 0.0), 
                                         (0.0, 1.3, 0.89), (0.0, 1.3, -0.89),
                                         (0.0, -1.3, 0.89), (0.0, -1.3, -0.89)])
-        
+
+    # --- 手动构建器: N#N (Nitrogen) ---
+    # RDKit SMILES: "[S]1NN1[S]"
+    elif SMILES == "[S]1NN1[S]":
+        print(f"--- 🛠️ get_fragment: 检测到 Nitrogen (N#N) side-on SMILES。使用手动构建器... ---")
         INTERNAL_SMILES_MARKER = "S1S"
-        
-        # 2. 使用 "S1S" 标记设置 info
-        fragment_atoms.info = {"smiles": INTERNAL_SMILES_MARKER}
-        
+        # 2x S, 2x N
+        manual_conformer = Atoms(['S', 'S', 'N', 'N'], 
+                             positions=[(0.67, 0.0, 0.0), (-0.67, 0.0, 0.0), 
+                                        (0.0, 0.55, 0.0), (0.0, -0.55, 0.0)]) # 1.1A N-N 键长
+
+    # --- 手动构建器: O=O (Oxygen) ---
+    # RDKit SMILES: "O1OSS1"
+    elif SMILES == "O1OSS1":
+        print(f"--- 🛠️ get_fragment: 检测到 Oxygen (O=O) side-on SMILES。使用手动构建器... ---")
+        INTERNAL_SMILES_MARKER = "S1S"
+        # 2x S, 2x O
+        manual_conformer = Atoms(['S', 'S', 'O', 'O'], 
+                             positions=[(0.67, 0.0, 0.0), (-0.67, 0.0, 0.0), 
+                                        (0.0, 0.6, 0.0), (0.0, -0.6, 0.0)]) # 1.2A O-O 键长
+    
+    # --- 如果是手动构建的 (side-on) ---
+    if manual_conformer is not None:
+        manual_conformer.info = {"smiles": INTERNAL_SMILES_MARKER}
         try:
-            # 3. 创建一个 Fragment 对象。
-            #    我们必须用一个 *RDKit可以解析的* SMILES 来初始化它（"S" 是有效的）
             fragment = Fragment(smile="S", to_initialize=0)
         except Exception:
-            # 备用方案
             fragment = Fragment(smile="C", to_initialize=1)
         
-        # 4. 手动覆盖 Fragment 对象的属性，以匹配我们手动创建的构型
-        fragment.smile = INTERNAL_SMILES_MARKER # <--- 传递 "S1S"
-        fragment.conformers = [fragment_atoms]
+        fragment.smile = INTERNAL_SMILES_MARKER
+        fragment.conformers = [manual_conformer]
         fragment.conformers_aligned = [False]
         
         print(f"--- 🛠️ get_fragment: 成功手动构建并修补了 autoadsorbate.Fragment (标记为: {INTERNAL_SMILES_MARKER})。 ---")
         return fragment
 
+    # --- 如果不是 side-on，则进入 "on-top" (Cl) 或其他逻辑 ---
     try:
-        # 默认路径：使用 autoadsorbate.Fragment 正常初始化 (例如 Cl-[N+H3])
+        # 默认路径：使用 autoadsorbate.Fragment 正常初始化
+        # (例如 "Cl[C]#[O+]" 或 "C[OH+]Cl")
         fragment = Fragment(smile=SMILES, to_initialize=to_initialize)
+        
+        TRICK_SMILES = None
+        
+        if "Cl" in SMILES:
+            # "on-top" 案例
+            TRICK_SMILES = "Cl"
+        
+        if TRICK_SMILES:
+            fragment.smile = TRICK_SMILES 
+            for conf in fragment.conformers:
+                conf.info["smiles"] = TRICK_SMILES
+                
+            print(f"--- 🛠️ get_fragment: 已将 Fragment.smile 和 conformer.info['smiles'] 覆盖为 '{TRICK_SMILES}' 以兼容库。 ---")
+
         print(f"--- 🛠️ get_fragment: 成功从 *SMILES '{SMILES}' (to_initialize={to_initialize}) 初始化 autoadsorbate.Fragment 对象。 ---")
         return fragment
     except Exception as e:
-        print(f"--- 🛠️ get_fragment: 警告: 无法使用 autoadsorbate.Fragment 初始化。回退到手动 RDKit 构建... ---")
-        # 回退逻辑 (适用于 Cl-SMILES)
+        print(f"--- 🛠️ get_fragment: 警告: 无法使用 autoadsorbate.Fragment 初始化 ('{e}')。回退到手动 RDKit 构建... ---")
         try:
             mol = Chem.MolFromSmiles(SMILES)
             mol_with_hs = Chem.AddHs(mol)
-            AllChem.EmbedMolecule(mol_with_hs, AllChem.ETKDG())
+            AllChem.EmbedMolecule(mol_with_hs, AllChem.ETKDGv2())
             
-            # 确保我们有一个 3D 构象
             if mol_with_hs.GetNumConformers() == 0:
-                AllChem.EmbedMolecule(mol_with_hs, AllChem.ETKDG())
+                AllChem.EmbedMolecule(mol_with_hs, AllChem.ETKDGv2())
 
             conf = mol_with_hs.GetConformer()
             positions = conf.GetPositions()
@@ -233,13 +234,16 @@ def get_fragment(SMILES: str, to_initialize: int = 1) -> Union[Fragment, ase.Ato
             
             atoms = Atoms(symbols=symbols, positions=positions)
             
-            # 同样要添加 .info
-            atoms.info = {"smiles": SMILES}
+            TRICK_SMILES = None
+            if "Cl" in SMILES:
+                TRICK_SMILES = "Cl"
+            else:
+                TRICK_SMILES = SMILES
 
+            atoms.info = {"smiles": TRICK_SMILES}
             print("--- 🛠️ get_fragment: 成功通过 RDKit 手动回退构建了 ase.Atoms。 ---")
-
-            # 同样要封装在 Fragment 对象中
-            fragment = Fragment(smile=SMILES, to_initialize=0)
+            
+            fragment = Fragment(smile=TRICK_SMILES, to_initialize=0)
             fragment.conformers = [atoms]
             fragment.conformers_aligned = [False]
             return fragment
@@ -281,9 +285,9 @@ def populate_surface_with_fragment(
         fragment = fragment_atoms 
 
     print(f"--- 🛠️ 正在初始化表面 (touch_sphere_size={touch_sphere_size})... ---")
-    
-    s = Surface(slab_atoms, touch_sphere_size=touch_sphere_size)
-    
+
+    s = Surface(slab_atoms, precision=1.0, touch_sphere_size=touch_sphere_size)
+
     # ... (sym_reduce 和 site 过滤逻辑)
     original_site_count = len(s.site_df)
     s.sym_reduce()
@@ -358,7 +362,7 @@ def relax_atoms(
 ) -> str:
     print(f"--- 🛠️ 正在初始化 MACE 计算器... ---")
     try:
-        calculator = mace_mp(model="medium", device='cpu', default_dtype='float64')
+        calculator = mace_mp(model="medium", device='cpu', default_dtype='float32', dispersion=True)
     except Exception as e:
         print(f"--- 🛑 MACE 初始化失败: {e} ---")
         raise
