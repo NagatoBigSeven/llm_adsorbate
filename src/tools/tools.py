@@ -362,7 +362,7 @@ def relax_atoms(
 ) -> str:
     print(f"--- 🛠️ 正在初始化 MACE 计算器... ---")
     try:
-        calculator = mace_mp(model="medium", device='cpu', default_dtype='float32', dispersion=True)
+        calculator = mace_mp(model="small", device='cpu', default_dtype='float32', dispersion=True)
     except Exception as e:
         print(f"--- 🛑 MACE 初始化失败: {e} ---")
         raise
