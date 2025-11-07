@@ -1,18 +1,17 @@
 import os
 import builtins
-import contextlib
-import io
 import math
 import argparse
 import json
-from typing import TypedDict, List, Optional, Any
+from collections import Counter
+from typing import TypedDict, List, Optional
 import numpy as np
 import pandas as pd
 import scipy
 import sklearn
 from rdkit import Chem
 import ase
-from  ase.io import read, write
+from  ase.io import read
 import autoadsorbate
 import torch
 import mace
@@ -38,6 +37,7 @@ from src.agent.prompts import PLANNER_PROMPT
 class AgentState(TypedDict):
     smiles: str
     slab_path: str
+    surface_composition: Optional[List[str]]
     user_request: str
     plan: Optional[dict]
     validation_error: Optional[str]
@@ -73,6 +73,30 @@ def get_llm():
     return llm
 
 # --- 3. 定义 LangGraph 节点 ---
+def pre_processor_node(state: AgentState) -> dict:
+    """
+    在规划前运行，读取Slab文件以提取表面成分。
+    """
+    print("--- 🔬 调用 Pre-Processor 节点 ---")
+    try:
+        slab_atoms = read(state["slab_path"])
+        # 获取所有原子的化学符号
+        symbols = slab_atoms.get_chemical_symbols()
+        # 获取唯一的化学符号列表, 按出现次数排序
+        # (例如 ['Cu', 'O'] 而不是 ['O', 'Cu'])
+        composition = [item[0] for item in Counter(symbols).most_common()]
+
+        print(f"--- 🔬 成功读取Slab。成分: {composition} ---")
+        return {"surface_composition": composition}
+    except Exception as e:
+        error_message = f"False, 基础 Slab 文件 '{state['slab_path']}' 无法被 ASE 读取: {e}"
+        print(f"--- 验证失败: {error_message} ---")
+        # 这是一个致命错误，我们设置 validation_error 来停止工作流
+        return {
+            "validation_error": error_message,
+            "surface_composition": None
+        }
+
 def solution_planner_node(state: AgentState) -> dict:
     print("--- 🧠 调用 Planner 节点 ---")
     llm = get_llm()
@@ -81,6 +105,7 @@ def solution_planner_node(state: AgentState) -> dict:
     prompt_input = {
         "smiles": state["smiles"],
         "slab_xyz_path": state["slab_path"],
+        "surface_composition": state.get("surface_composition", "未知"),
         "user_request": state["user_request"],
         "history": "\n".join(state["history"]) if state.get("history") else "无"
     }
@@ -394,11 +419,13 @@ def route_after_analysis(state: AgentState) -> str:
 def get_agent_executor():
     """ 构建并编译 Adsorb-Agent 状态机图。"""
     workflow = StateGraph(AgentState)
+    workflow.add_node("pre_processor", pre_processor_node)
     workflow.add_node("planner", solution_planner_node)
     workflow.add_node("plan_validator", plan_validator_node) 
     workflow.add_node("tool_executor", tool_executor_node)
     workflow.add_node("final_analyzer", final_analyzer_node)
-    workflow.set_entry_point("planner")
+    workflow.set_entry_point("pre_processor")
+    workflow.add_edge("pre_processor", "planner")
     workflow.add_edge("planner", "plan_validator")
     workflow.add_edge("tool_executor", "final_analyzer")
     workflow.add_conditional_edges(

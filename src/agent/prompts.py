@@ -7,7 +7,8 @@ PLANNER_PROMPT = PromptTemplate(
 
 **输入系统:**
 - 原始 SMILES: {smiles}
-- 催化剂表面 .xyz 文件: {slab_xyz_path}
+- 催化剂表面 .xyz 文件路径: {slab_xyz_path}
+- 催化剂表面 .xyz 文件内容: {surface_composition}
 - 用户请求: {user_request}
 
 **--- 历史尝试记录 (你之前的方案) ---**
@@ -26,7 +27,7 @@ PLANNER_PROMPT = PromptTemplate(
     - *示例 (CCO - 乙醇)*: C[0], C[1], O[2]
     - *示例 (C=C - 乙烯)*: C[0], C[1]
     - *示例 ([C-]#[O+] - 一氧化碳)*: C[0], O[1]
-5.  **分析表面:** .xyz 文件名是 `{slab_xyz_path}`。这代表什么表面？（例如: "Cu(211)", "NiFeO"）。表面原子是什么？（例如: "Cu", "Fe", "Ni", "Pd", "O"）。
+5.  **分析表面:** 催化剂表面 .xyz 文件名是 `{slab_xyz_path}`，内容是 `{surface_composition}`，这代表什么表面？（例如: "Cu(211)", "NiFeO"）。表面原子是什么？（例如: "Cu", "Fe", "Ni", "Pd", "O"）。
 6.  **制定方案 (位点):**
     - 哪种吸附位点（ontop, bridge, hollow）最有可能？
     - `surface_binding_atoms`：该位点由哪些 **真实** 表面原子构成？（例如: 'ontop' -> ["Cu"]）
@@ -92,5 +93,5 @@ PLANNER_PROMPT = PromptTemplate(
   }}
 }}
 """,
-    input_variables=["smiles", "slab_xyz_path", "user_request", "history"]
+    input_variables=["smiles", "slab_xyz_path", "surface_composition", "user_request", "history"]
 )

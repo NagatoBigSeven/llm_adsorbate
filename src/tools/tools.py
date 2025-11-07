@@ -2,16 +2,14 @@ import ase
 from ase.io import read, write
 from autoadsorbate import Surface, Fragment
 from ase.constraints import FixAtoms
-from autoadsorbate.Surf import attach_fragment
 from ase.optimize import BFGS
 from ase.io.trajectory import Trajectory
-import torch
-from mace.calculators import mace_mp, MACECalculator
+from mace.calculators import mace_mp
 from ase.md.langevin import Langevin
 from ase import units
 import os
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
-from ase.neighborlist import natural_cutoffs, NeighborList
+from ase.neighborlist import natural_cutoffs
 import numpy as np
 import json
 from rdkit import Chem
