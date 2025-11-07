@@ -398,7 +398,6 @@ def populate_surface_with_fragment(
              print(f"--- 🛠️ 警告: 尝试将 '{plan_orientation}' 放置在 'hollow' 位点上。这可能不是一个稳定的构型。 ---")
 
     else:
-        # 允许 "all"
         if site_type == "all":
              print(f"--- 🛠️ 正在搜索 'all' 位点... ---")
              site_df_filtered = s.site_df

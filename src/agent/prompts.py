@@ -35,6 +35,9 @@ PLANNER_PROMPT = PromptTemplate(
     - `orientation`：朝向是 'end-on'（单点连接）还是 'side-on'（双点连接）？
 8.  **制定方案 (计算):**
     - `relax_top_n` (可选): 你想弛豫多少个能量最低的构型？默认为 1。如果你不确定，使用 1。
+    - `touch_sphere_size` (float): 表面位点搜索的半径。(默认: 2.8)
+    - `overlap_thr` (float): 放置吸附物时允许的最小重叠距离。(默认: 0.1)
+    - `conformers_per_site_cap` (int): 每个位点最多保留多少个构象？(默认: 2)
 
 **!!! 你的唯一工作是输出这个战略方案。!!!**
 
@@ -82,7 +85,10 @@ PLANNER_PROMPT = PromptTemplate(
     "surface_binding_atoms": [...],
     "adsorbate_binding_indices": [...],
     "orientation": "...",
-    "relax_top_n": 1
+    "relax_top_n": 1,
+    "touch_sphere_size": 2.8,
+    "overlap_thr": 0.1,
+    "conformers_per_site_cap": 2
   }}
 }}
 """,
