@@ -25,12 +25,11 @@ from langchain_core.output_parsers import JsonOutputParser
 
 from src.tools.tools import (
     read_atoms_object, 
-    get_fragment,
+    create_fragment_from_plan,
     populate_surface_with_fragment,
     relax_atoms, 
     save_ase_atoms,
     analyze_relaxation_results,
-    generate_surrogate_smiles
 )
 from src.agent.prompts import PLANNER_PROMPT
 
@@ -43,7 +42,7 @@ class AgentState(TypedDict):
     validation_error: Optional[str]
     messages: List[BaseMessage]
     analysis_json: Optional[str]
-    surrogate_smiles: Optional[str]
+    # [已删除] surrogate_smiles: Optional[str] # 不再需要在状态中传递
     history: List[str]
 
 # --- 2. 设置环境和 LLM ---
@@ -73,7 +72,7 @@ def get_llm():
     )
     return llm
 
-# --- 3. 定义 LangGraph 节点 (Nodes) ---
+# --- 3. 定义 LangGraph 节点 ---
 def solution_planner_node(state: AgentState) -> dict:
     print("--- 🧠 调用 Planner 节点 ---")
     llm = get_llm()
@@ -142,7 +141,7 @@ def plan_validator_node(state: AgentState) -> dict:
     orientation = plan.get("orientation", "")
     site_type = plan.get("site_type", "")
     surf_atoms = plan.get("surface_binding_atoms", [])
-    ads_atoms = plan.get("adsorbate_binding_atoms", [])
+    ads_indices = plan.get("adsorbate_binding_indices", [])
     if site_type == "ontop" and len(surf_atoms) != 1:
         error = f"False, Rule 1: Python check failed. site_type is 'ontop' but surface_binding_atoms has {len(surf_atoms)} members (should be 1)."
         print(f"--- 验证失败: {error} ---")
@@ -155,38 +154,17 @@ def plan_validator_node(state: AgentState) -> dict:
         error = f"False, Rule 1: Python check failed. site_type is 'hollow' but surface_binding_atoms has {len(surf_atoms)} members (should be >= 3)."
         print(f"--- 验证失败: {error} ---")
         return {"validation_error": error}
-    if orientation == "end-on" and len(ads_atoms) != 1:
-        error = f"False, Rule 2: Python check failed. orientation is 'end-on' but adsorbate_binding_atoms has {len(ads_atoms)} members (should be 1)."
+    if orientation == "end-on" and len(ads_indices) != 1:
+        error = f"False, Rule 2: Python check failed. orientation is 'end-on' but adsorbate_binding_indices has {len(ads_indices)} members (should be 1)."
         print(f"--- 验证失败: {error} ---")
         return {"validation_error": error}
-    if orientation == "side-on" and len(ads_atoms) < 2:
-        error = f"False, Rule 2: Python check failed. orientation is 'side-on' but adsorbate_binding_atoms has {len(ads_atoms)} members (should be >= 2)."
+    if orientation == "side-on" and len(ads_indices) != 2:
+        error = f"False, Rule 2: Python check failed. orientation is 'side-on' but adsorbate_binding_indices has {len(ads_indices)} members (should be 2)."
         print(f"--- 验证失败: {error} ---")
         return {"validation_error": error}
     print("--- 验证成功 ---")
     return {"validation_error": None}
 
-def smiles_translator_node(state: AgentState) -> dict:
-    """ 节点 3: SMILES 翻译器 """
-    print("--- 🔬 调用 SMILES 翻译器节点 ---")
-    try:
-        plan_solution = state["plan"]["solution"]
-        original_smiles = state["smiles"]
-        surrogate_smiles = generate_surrogate_smiles(
-            original_smiles=original_smiles,
-            binding_atoms=plan_solution["adsorbate_binding_atoms"],
-            orientation=plan_solution["orientation"]
-        )
-        return {
-            "surrogate_smiles": surrogate_smiles,
-            "messages": [ToolMessage(content=f"SMILES 翻译成功: {surrogate_smiles}", tool_call_id="smiles_translator")]
-        }
-    except Exception as e:
-        print(f"--- 🛑 SMILES 翻译失败: {e} ---")
-        return {
-            "validation_error": f"False, SMILES 翻译器失败: {e}. 这可能是一个无效的键合方案（例如，在分子中未找到 '{state.get('plan', {}).get('solution', {}).get('adsorbate_binding_atoms', ['N/A'])[0]}'）。请重新规划。",
-            "messages": [ToolMessage(content=f"SMILES 翻译失败: {e}", tool_call_id="smiles_translator")]
-        }
 
 def tool_executor_node(state: AgentState) -> dict:
     """ 节点 4: Tool Executor """
@@ -203,7 +181,6 @@ def tool_executor_node(state: AgentState) -> dict:
         }
 
     slab_path = state["slab_path"]
-    surrogate_smiles = state["surrogate_smiles"]
     tool_logs = []
     analysis_json = None
     
@@ -211,14 +188,18 @@ def tool_executor_node(state: AgentState) -> dict:
         slab_atoms = read_atoms_object(slab_path)
         tool_logs.append(f"成功: 已从 {slab_path} 读取 slab 原子。")
 
-        fragment_object = get_fragment(SMILES=surrogate_smiles) 
-        tool_logs.append(f"成功: 已从 *SMILES '{surrogate_smiles}' 生成片段对象。")
+        fragment_object = create_fragment_from_plan(
+            original_smiles=state["smiles"],
+            binding_atom_indices=plan_solution.get("adsorbate_binding_indices"),
+            orientation=plan_solution.get("orientation"),
+            to_initialize=5
+        )
+        tool_logs.append(f"成功: 已从规划中生成片段对象 (SMILES: {state['smiles']})。")
 
         generated_traj_file = populate_surface_with_fragment(
             slab_atoms=slab_atoms,
-            fragment_atoms=fragment_object,
+            fragment_object=fragment_object,
             site_type=plan_solution.get("site_type"),
-            orientation=plan_solution.get("orientation"),
         )
         tool_logs.append(f"成功: 已将片段放置在 slab 上。构型保存在: {generated_traj_file}")
 
@@ -228,18 +209,20 @@ def tool_executor_node(state: AgentState) -> dict:
         
         print("--- ⏳ 开始结构弛豫... ---")
         slab_indices = list(range(len(slab_atoms)))
+        relax_n = plan_solution.get("relax_top_n", 1)
         final_traj_file = relax_atoms(
             atoms_list=list(initial_conformers),
-            slab_indices=slab_indices
+            slab_indices=slab_indices,
+            relax_top_n=relax_n
         )
-        tool_logs.append(f"成功: 结构弛豫完成。弛豫轨迹保存在 '{final_traj_file}'。")
+        tool_logs.append(f"成功: 结构弛豫完成 (弛豫了 Top {relax_n})。轨迹保存在 '{final_traj_file}'。")
         
         print("--- 🔬 调用分析工具... ---")
         analysis_json_str = analyze_relaxation_results(
             relaxed_trajectory_file=final_traj_file,
             slab_atoms=slab_atoms,
             original_smiles=state["smiles"],
-            binding_atoms=plan_solution.get("adsorbate_binding_atoms"),
+            binding_atom_indices=plan_solution.get("adsorbate_binding_indices"),
             orientation=plan_solution.get("orientation")
         )
         tool_logs.append(f"成功: 分析工具已执行。")
@@ -338,16 +321,7 @@ def route_after_validation(state: AgentState) -> str:
         print(f"--- 决策: 方案失败，返回规划 ---")
         return "planner"
     else:
-        print(f"--- 决策: 方案通过，前往翻译 ---")
-        return "smiles_translator"
-
-def route_after_translation(state: AgentState) -> str:
-    print("--- 🤔 Python 决策分支 2 (翻译器) ---")
-    if state.get("validation_error"):
-        print(f"--- 决策: 翻译失败，返回规划 ---")
-        return "planner"
-    else:
-        print(f"--- 决策: 翻译成功，前往执行 ---")
+        print(f"--- 决策: 方案通过，前往执行 ---")
         return "tool_executor"
 
 def route_after_analysis(state: AgentState) -> str:
@@ -394,7 +368,6 @@ def get_agent_executor():
     workflow = StateGraph(AgentState)
     workflow.add_node("planner", solution_planner_node)
     workflow.add_node("plan_validator", plan_validator_node) 
-    workflow.add_node("smiles_translator", smiles_translator_node)
     workflow.add_node("tool_executor", tool_executor_node)
     workflow.add_node("final_analyzer", final_analyzer_node)
     workflow.set_entry_point("planner")
@@ -403,11 +376,6 @@ def get_agent_executor():
     workflow.add_conditional_edges(
         "plan_validator",
         route_after_validation,
-        {"smiles_translator": "smiles_translator", "planner": "planner"}
-    )
-    workflow.add_conditional_edges(
-        "smiles_translator",
-        route_after_translation,
         {"tool_executor": "tool_executor", "planner": "planner"}
     )
     workflow.add_conditional_edges(
@@ -427,7 +395,6 @@ def _prepare_initial_state(smiles: str, slab_path: str, user_request: str) -> Ag
         "validation_error": None,
         "messages": [HumanMessage(content=f"SMILES: {smiles}\nSLAB: {slab_path}\nREQUEST: {user_request}")],
         "analysis_json": None,
-        "surrogate_smiles": None,
         "history": []
     }
 
