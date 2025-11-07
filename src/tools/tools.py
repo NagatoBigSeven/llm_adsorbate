@@ -586,7 +586,9 @@ def analyze_relaxation_results(
 ) -> str:
     """
     分析弛豫轨迹，找到最稳定的结构，并检查其键合情况。
-    现在使用 binding_atom_indices 检查规划的原子。
+    此版本不再使用 RDKit 索引进行猜测，而是依赖
+    autoadsorbate 库保证的原子顺序 (即 adsorbate_indices[0] 
+    始终是 end-on 的目标，[0] 和 [1] 始终是 side-on 的目标)。
     """
     try:
         print(f"--- 🛠️ 正在分析弛豫结果: {relaxed_trajectory_file} ---")
@@ -595,21 +597,18 @@ def analyze_relaxation_results(
             return json.dumps({"status": "error", "message": "弛豫轨迹为空或无法读取。"})
 
         # 1. 找到最稳定的构型
-        # 注意：relax_atoms 可能返回多个已弛豫的结构
         energies = []
         for atoms in traj:
             try:
-                # 兼容 .xyz (无 energy) 和 .traj (有 energy)
                 e = atoms.get_potential_energy()
                 energies.append(e)
             except Exception:
-                # 如果从 xyz 读取，可能没有能量，只取最后一个
                 pass
         
-        if not energies: # 如果 traj 是 .xyz 且为空
+        if not energies:
             if len(traj) > 0:
-                 relaxed_atoms = traj[-1] # 回退到只取最后一个
-                 min_energy = -999.0 # 能量未知
+                 relaxed_atoms = traj[-1]
+                 min_energy = -999.0
                  best_index = len(traj) - 1
                  print(f"--- 分析: 警告：无法从 .xyz 读取能量。回退到分析最后一个结构 (Index {best_index}) ---")
             else:
@@ -627,114 +626,141 @@ def analyze_relaxation_results(
         slab_atoms_relaxed = relaxed_atoms[slab_indices]
         adsorbate_atoms_relaxed = relaxed_atoms[adsorbate_indices]
         
-        if not adsorbate_indices:
-             return json.dumps({"status": "error", "message": "在弛豫结构中未找到吸附物原子。"})
+        target_atom_global_index = -1
+        target_atom_symbol = ""
+        analysis_message = ""
+        result = {}
 
-        # 3. 检查键合 - 找到规划中*第一个*目标原子
-        if not binding_atom_indices:
-             return json.dumps({"status": "error", "message": "分析失败：'binding_atom_indices' 列表为空。"})
-             
-        # 我们需要从 RDKit SMILES 索引 (例如 C[0]) 映射到
-        # 弛豫后的 ase.Atoms 对象的索引。
-        # 我们转而使用符号 (Symbol) 作为回退
-        
-        target_atom_rdkit_index = binding_atom_indices[0]
-        
-        # 尝试通过RDKit获取该索引的符号
-        mol_check = Chem.MolFromSmiles(original_smiles)
-        if not mol_check: mol_check = Chem.MolFromSmiles(original_smiles.replace("C#O", "[C-]#[O+]"))
-        
-        if target_atom_rdkit_index >= mol_check.GetNumAtoms():
-             return json.dumps({"status": "error", "message": f"分析失败：规划的索引 {target_atom_rdkit_index} 超出了 {original_smiles} 的范围。"})
-
-        target_atom_symbol = mol_check.GetAtomWithIdx(target_atom_rdkit_index).GetSymbol()
-        print(f"--- 分析: 规划的索引 {target_atom_rdkit_index} 对应于符号 '{target_atom_symbol}'。---")
-        
-        # 在弛豫后的吸附物中找到该原子
-        # (这仍然会遇到“第一个 C”的问题，但比索引映射更安全)
-        target_atom_local_index = -1
-        for i, atom in enumerate(adsorbate_atoms_relaxed):
-            if atom.symbol == target_atom_symbol:
-                target_atom_local_index = i
-                break # 找到了第一个匹配的符号
-        
-        if target_atom_local_index == -1:
-             return json.dumps({"status": "error", "message": f"在弛豫后的吸附物中未找到目标原子 {target_atom_symbol}。"})
-        
-        # 获取其在*完整* Atoms 对象中的全局索引
-        target_atom_global_index = adsorbate_indices[target_atom_local_index]
-        target_atom_pos = relaxed_atoms[target_atom_global_index].position
-
-        # 4. 计算该原子与表面的最近距离
-        distances = np.linalg.norm(slab_atoms_relaxed.positions - target_atom_pos, axis=1)
-        min_distance = np.min(distances)
-        nearest_slab_atom_global_index = slab_indices[np.argmin(distances)]
-        nearest_slab_atom_symbol = relaxed_atoms[nearest_slab_atom_global_index].symbol
-
-        # 5. 估计键合
+        # 准备共价键检查
         cov_cutoffs = natural_cutoffs(relaxed_atoms, mult=1.0)
-        radius_1 = cov_cutoffs[target_atom_global_index]
-        radius_2 = cov_cutoffs[nearest_slab_atom_global_index]
-        bonding_cutoff = (radius_1 + radius_2) * 1.1 # 1.1 的容差
-        
-        is_bound = min_distance <= bonding_cutoff
-        
-        analysis_message = (
-            f"最稳定的构型能量: {min_energy:.4f} eV。 "
-            f"目标吸附物原子: {target_atom_symbol} (来自规划索引 {target_atom_rdkit_index}，在弛豫结构中为全局索引 {target_atom_global_index})。 "
-            f"最近的表面原子: {nearest_slab_atom_symbol} (Index {nearest_slab_atom_global_index})。 "
-            f"最终距离: {round(min_distance, 3)} Å. "
-            f"估计共价键阈值: {round(bonding_cutoff, 3)} Å. "
-            f"是否成键: {is_bound}."
-        )
 
-        # 6. 如果是 side-on，检查第二个原子
-        if orientation == "side-on" and len(binding_atom_indices) > 1:
-            try:
-                second_atom_rdkit_index = binding_atom_indices[1]
-                second_atom_symbol = mol_check.GetAtomWithIdx(second_atom_rdkit_index).GetSymbol()
-                
-                second_atom_global_index = -1
-                # 寻找*第二个* (或不同的) 键合原子
-                for i, atom_idx in enumerate(adsorbate_indices):
-                    if relaxed_atoms[atom_idx].symbol == second_atom_symbol and atom_idx != target_atom_global_index:
-                        second_atom_global_index = atom_idx
-                        break
-                
-                if second_atom_global_index != -1:
-                    second_atom_pos = relaxed_atoms[second_atom_global_index].position
-                    distances_2 = np.linalg.norm(slab_atoms_relaxed.positions - second_atom_pos, axis=1)
-                    min_distance_2 = np.min(distances_2)
-                    radius_3 = cov_cutoffs[second_atom_global_index]
-                    nearest_slab_atom_global_index_2 = slab_indices[np.argmin(distances_2)]
-                    radius_4 = cov_cutoffs[nearest_slab_atom_global_index_2]
-                    
-                    bonding_cutoff_2 = (radius_3 + radius_4) * 1.1 
-                    
-                    is_bound_2 = min_distance_2 <= bonding_cutoff_2
-                    analysis_message += f" Side-on ({second_atom_symbol}) 距离: {round(min_distance_2, 3)} Å. 键合: {is_bound_2}."
-            except Exception:
-                pass 
+        if orientation == "end-on":
+            # 目标原子 *总是* 吸附物列表中的第一个
+            target_atom_global_index = adsorbate_indices[0]
+            target_atom_symbol = relaxed_atoms[target_atom_global_index].symbol
+            target_atom_pos = relaxed_atoms[target_atom_global_index].position
 
-        result = {
-            "status": "success",
-            "message": analysis_message,
-            "most_stable_energy_eV": min_energy,
-            "target_adsorbate_atom": target_atom_symbol,
-            "target_adsorbate_atom_index": int(target_atom_global_index),
-            "nearest_slab_atom": nearest_slab_atom_symbol,
-            "nearest_slab_atom_index": int(nearest_slab_atom_global_index),
-            "final_bond_distance_A": round(min_distance, 3),
-            "estimated_covalent_cutoff_A": round(bonding_cutoff, 3),
-            "is_covalently_bound": bool(is_bound)
-        }
+            print(f"--- 分析: (end-on 模式) 正在检查第一个吸附物原子, 符号: '{target_atom_symbol}', 全局索引: {target_atom_global_index}。---")
+
+            # 4. 计算该原子与表面的最近距离
+            distances = np.linalg.norm(slab_atoms_relaxed.positions - target_atom_pos, axis=1)
+            min_distance = np.min(distances)
+            nearest_slab_atom_global_index = slab_indices[np.argmin(distances)]
+            nearest_slab_atom_symbol = relaxed_atoms[nearest_slab_atom_global_index].symbol
+
+            # 5. 估计键合
+            radius_1 = cov_cutoffs[target_atom_global_index]
+            radius_2 = cov_cutoffs[nearest_slab_atom_global_index]
+            bonding_cutoff = (radius_1 + radius_2) * 1.1 # 1.1 的容差
+            is_bound = min_distance <= bonding_cutoff
+
+            analysis_message = (
+                f"最稳定的构型能量: {min_energy:.4f} eV。 "
+                f"目标吸附物原子: {target_atom_symbol} (来自规划索引 {binding_atom_indices[0]}，在弛豫结构中为全局索引 {target_atom_global_index})。 "
+                f"最近的表面原子: {nearest_slab_atom_symbol} (Index {nearest_slab_atom_global_index})。 "
+                f"最终距离: {round(min_distance, 3)} Å. "
+                f"估计共价键阈值: {round(bonding_cutoff, 3)} Å. "
+                f"是否成键: {is_bound}."
+            )
+
+            result = {
+                "status": "success",
+                "message": analysis_message,
+                "most_stable_energy_eV": min_energy,
+                "target_adsorbate_atom": target_atom_symbol,
+                "target_adsorbate_atom_index": int(target_atom_global_index),
+                "nearest_slab_atom": nearest_slab_atom_symbol,
+                "nearest_slab_atom_index": int(nearest_slab_atom_global_index),
+                "final_bond_distance_A": round(min_distance, 3),
+                "estimated_covalent_cutoff_A": round(bonding_cutoff, 3),
+                "is_covalently_bound": bool(is_bound)
+            }
         
+        elif orientation == "side-on":
+            if len(adsorbate_indices) < 2:
+                 return json.dumps({"status": "error", "message": f"Side-on 模式需要至少 2 个吸附物原子，但只找到 {len(adsorbate_indices)} 个。"})
+            
+            # 目标原子 *总是* 吸附物列表中的前两个
+            
+            # --- 分析第一个原子 (Atom 0) ---
+            target_atom_global_index = adsorbate_indices[0]
+            target_atom_symbol = relaxed_atoms[target_atom_global_index].symbol
+            target_atom_pos = relaxed_atoms[target_atom_global_index].position
+            print(f"--- 分析: (side-on 模式) 正在检查第一个吸附物原子, 符号: '{target_atom_symbol}', 全局索引: {target_atom_global_index}。---")
+
+            distances = np.linalg.norm(slab_atoms_relaxed.positions - target_atom_pos, axis=1)
+            min_distance = np.min(distances)
+            nearest_slab_atom_global_index = slab_indices[np.argmin(distances)]
+            nearest_slab_atom_symbol = relaxed_atoms[nearest_slab_atom_global_index].symbol
+            radius_1 = cov_cutoffs[target_atom_global_index]
+            radius_2 = cov_cutoffs[nearest_slab_atom_global_index]
+            bonding_cutoff = (radius_1 + radius_2) * 1.1
+            is_bound_1 = min_distance <= bonding_cutoff
+
+            # --- 分析第二个原子 (Atom 1) ---
+            second_atom_global_index = adsorbate_indices[1]
+            second_atom_symbol = relaxed_atoms[second_atom_global_index].symbol
+            second_atom_pos = relaxed_atoms[second_atom_global_index].position
+            print(f"--- 分析: (side-on 模式) 正在检查第二个吸附物原子, 符号: '{second_atom_symbol}', 全局索引: {second_atom_global_index}。---")
+            
+            distances_2 = np.linalg.norm(slab_atoms_relaxed.positions - second_atom_pos, axis=1)
+            min_distance_2 = np.min(distances_2)
+            nearest_slab_atom_global_index_2 = slab_indices[np.argmin(distances_2)]
+            nearest_slab_atom_symbol_2 = relaxed_atoms[nearest_slab_atom_global_index_2].symbol
+            radius_3 = cov_cutoffs[second_atom_global_index]
+            radius_4 = cov_cutoffs[nearest_slab_atom_global_index_2]
+            bonding_cutoff_2 = (radius_3 + radius_4) * 1.1
+            is_bound_2 = min_distance_2 <= bonding_cutoff_2
+
+            # --- 组合结果 ---
+            # 只有两个原子都成键时，才算成功
+            is_bound = bool(is_bound_1 and is_bound_2) 
+            
+            analysis_message = (
+                f"最稳定的构型能量: {min_energy:.4f} eV。 "
+                f"目标原子 1: {target_atom_symbol} (来自规划索引 {binding_atom_indices[0]}，全局索引 {target_atom_global_index})。 "
+                f"  -> 最近: {nearest_slab_atom_symbol} (Index {nearest_slab_atom_global_index}), 距离: {round(min_distance, 3)} Å (阈值: {round(bonding_cutoff, 3)}), 成键: {is_bound_1}。 "
+                f"目标原子 2: {second_atom_symbol} (来自规划索引 {binding_atom_indices[1]}，全局索引 {second_atom_global_index})。 "
+                f"  -> 最近: {nearest_slab_atom_symbol_2} (Index {nearest_slab_atom_global_index_2}), 距离: {round(min_distance_2, 3)} Å (阈值: {round(bonding_cutoff_2, 3)}), 成键: {is_bound_2}。 "
+                f"整体是否成键: {is_bound}."
+            )
+            
+            result = {
+                "status": "success",
+                "message": analysis_message,
+                "most_stable_energy_eV": min_energy,
+                "is_covalently_bound": is_bound,
+                "atom_1": {
+                    "symbol": target_atom_symbol,
+                    "global_index": int(target_atom_global_index),
+                    "distance_A": round(min_distance, 3),
+                    "is_bound": bool(is_bound_1)
+                },
+                "atom_2": {
+                    "symbol": second_atom_symbol,
+                    "global_index": int(second_atom_global_index),
+                    "distance_A": round(min_distance_2, 3),
+                    "is_bound": bool(is_bound_2)
+                }
+            }
+
+        else:
+             return json.dumps({"status": "error", "message": f"分析失败：未知的朝向 '{orientation}'。"})
+
+        # 6. 保存最终结构
         best_atoms_filename = f"outputs/BEST_{original_smiles.replace('=','_').replace('#','_')}_on_surface.xyz"
-        save_ase_atoms(relaxed_atoms, best_atoms_filename)
-        result["best_structure_file"] = best_atoms_filename
+        try:
+            write(best_atoms_filename, relaxed_atoms)
+            print(f"--- 🛠️ 成功将最佳结构保存到 {best_atoms_filename} ---")
+            result["best_structure_file"] = best_atoms_filename
+        except Exception as e:
+            print(f"--- 🛠️ 错误: 无法保存最佳结构到 {best_atoms_filename}: {e} ---")
+
 
         return json.dumps(result)
 
     except Exception as e:
-        print(f"--- 🛠️ 错误: 分析弛豫失败: {e} ---")
-        return json.dumps({"status": "error", "message": f"分析弛豫失败: {e}"})
+        import traceback
+        print(f"--- 🛠️ 错误: 分析弛豫时发生意外异常: {e} ---")
+        print(traceback.format_exc())
+        return json.dumps({"status": "error", "message": f"分析弛豫时发生意外异常: {e}"})

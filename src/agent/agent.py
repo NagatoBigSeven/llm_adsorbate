@@ -42,7 +42,6 @@ class AgentState(TypedDict):
     validation_error: Optional[str]
     messages: List[BaseMessage]
     analysis_json: Optional[str]
-    # [已删除] surrogate_smiles: Optional[str] # 不再需要在状态中传递
     history: List[str]
 
 # --- 2. 设置环境和 LLM ---
@@ -327,6 +326,7 @@ def route_after_validation(state: AgentState) -> str:
 def route_after_analysis(state: AgentState) -> str:
     """
     检查计算是否真正成功。
+    增强了失败报告功能，以正确处理 end-on 和 side-on 构型。
     """
     print("--- 🤔 Python 决策分支 3 (分析器) ---")
     try:
@@ -341,15 +341,27 @@ def route_after_analysis(state: AgentState) -> str:
             plan_str = json.dumps(state.get("plan", "{}"))
             fail_reason = analysis_data.get("message", "计算失败或未键合。")
             if status == "success" and not is_bound:
-                fail_reason = f"分析完成，但吸附物未与表面键合 (is_covalently_bound: false)。最终距离: {analysis_data.get('final_bond_distance_A', 'N/A')} Å。"
+                if "atom_1" in analysis_data and "atom_2" in analysis_data: # side-on
+                    a1_dist = analysis_data["atom_1"].get("distance_A", "N/A")
+                    a1_bound = analysis_data["atom_1"].get("is_bound", False)
+                    a2_dist = analysis_data["atom_2"].get("distance_A", "N/A")
+                    a2_bound = analysis_data["atom_2"].get("is_bound", False)
+                    fail_reason = f"分析完成 (side-on)，但未完全键合。Atom 1 距离: {a1_dist} Å (Bound: {a1_bound}), Atom 2 距离: {a2_dist} Å (Bound: {a2_bound})."
+                
+                elif "final_bond_distance_A" in analysis_data: # end-on
+                    dist = analysis_data.get("final_bond_distance_A", "N/A")
+                    fail_reason = f"分析完成 (end-on)，但吸附物未与表面键合。最终距离: {dist} Å。"
+                
+                else:
+                    fail_reason = analysis_data.get("message", "分析完成，但 is_covalently_bound 为 false。")
 
             history_entry = f"失败的尝试: Plan={plan_str}, Result={fail_reason}"
             
             current_history = state.get("history", [])
             current_history.append(history_entry)
 
-            if len(current_history) > 10:
-                print("--- 决策: 已达到 10 次重试上限。流程结束。 ---")
+            if len(current_history) > 3:
+                print(f"--- 决策: 已达到 {len(current_history)} 次重试上限。流程结束。 ---")
                 return "end"
             
             state["history"] = current_history
