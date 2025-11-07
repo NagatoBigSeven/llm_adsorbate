@@ -29,12 +29,7 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
     """
     print(f"--- 🔬 调用 SMILES 翻译器: {original_smiles} via indices {binding_atom_indices} (朝向: {orientation}) ---")
     
-    sanitized_smiles = original_smiles
-    if original_smiles == "C#O":
-        sanitized_smiles = "[C-]#[O+]"
-        print(f"--- 🔬 检测到无效的 'C#O'。已将其清理为 '{sanitized_smiles}'。 ---")
-    
-    mol = Chem.MolFromSmiles(sanitized_smiles)
+    mol = Chem.MolFromSmiles(original_smiles)
     if not mol:
         raise ValueError(f"RDKit 无法解析原始 SMILES: {original_smiles}")
     
@@ -351,26 +346,27 @@ def create_fragment_from_plan(
 def populate_surface_with_fragment(
     slab_atoms: ase.Atoms, 
     fragment_object: Fragment,
-    site_type: str,
-    allowed_surface_symbols: list = None,
-    conformers_per_site_cap: int = 2,
-    overlap_thr: float = 0.1,
-    touch_sphere_size: float = 2.8,
+    plan_solution: dict,
     **kwargs
 ) -> str:
     """
     使用 autoadsorbate.Surface.get_populated_sites 自动在表面上放置片段。
     
-    此版本从 Fragment 对象中读取规划信息 (plan_orientation)，
-    并验证它是否与请求的 site_type 兼容，而不是依赖
-    脆弱的 SMILES 技巧。
+    此版本从完整的 plan_solution 字典中读取所有参数，
+    并应用表面原子过滤和暴露计算参数。
     """
-    
+
     # --- 1. 从 Fragment 对象中检索规划 ---
     if not hasattr(fragment_object, "info") or "plan_orientation" not in fragment_object.info:
         raise ValueError("Fragment 对象缺少 'plan_orientation' 信息。请使用 'create_fragment_from_plan' 创建它。")
         
     plan_orientation = fragment_object.info["plan_orientation"]
+
+    # --- 从规划中读取参数 (或使用默认值) ---
+    site_type = plan_solution.get("site_type", "all")
+    conformers_per_site_cap = plan_solution.get("conformers_per_site_cap", 2)
+    overlap_thr = plan_solution.get("overlap_thr", 0.1)
+    touch_sphere_size = plan_solution.get("touch_sphere_size", 2.8)
 
     print(f"--- 🛠️ 正在初始化表面 (touch_sphere_size={touch_sphere_size})... ---")
     s = Surface(slab_atoms, precision=1.0, touch_sphere_size=touch_sphere_size)
@@ -379,7 +375,7 @@ def populate_surface_with_fragment(
     s.sym_reduce()
     print(f"--- 🛠️ 表面位点：从 {original_site_count} 个减少到 {len(s.site_df)} 个不等价位点。 ---")
 
-    # --- 2. 验证规划与位点的兼容性 ---
+    # --- 2. 验证规划与位点的兼容性 (Connectivity 过滤) ---
     site_df_filtered = s.site_df
     
     if site_type == "ontop":
@@ -389,7 +385,9 @@ def populate_surface_with_fragment(
         
     elif site_type == "bridge":
         if plan_orientation != "side-on":
-            raise ValueError(f"规划不匹配：'bridge' 位点 (connectivity=2) 与 '{plan_orientation}' 朝向不兼容。")
+             # 允许 'end-on' 模式在 'bridge' 位点上 (例如 H 在桥上)
+             if plan_orientation not in ["side-on", "end-on"]:
+                raise ValueError(f"规划不匹配：'bridge' 位点 (connectivity=2) 与 '{plan_orientation}' 朝向不兼容。")
         site_df_filtered = s.site_df[s.site_df.connectivity == 2]
 
     elif site_type == "hollow":
@@ -397,43 +395,55 @@ def populate_surface_with_fragment(
         if plan_orientation not in ["end-on"]:
              print(f"--- 🛠️ 警告: 尝试将 '{plan_orientation}' 放置在 'hollow' 位点上。这可能不是一个稳定的构型。 ---")
 
-    else:
-        if site_type == "all":
-             print(f"--- 🛠️ 正在搜索 'all' 位点... ---")
-             site_df_filtered = s.site_df
-        else:
-            raise ValueError(f"未知的 site_type: '{site_type}'。必须是 'ontop', 'bridge', 'hollow', 或 'all'。")
-
-    # [可选] ... (allowed_surface_symbols 过滤逻辑可以在此添加) ...
+    elif site_type == "all":
+         print(f"--- 🛠️ 正在搜索 'all' 位点... ---")
+         site_df_filtered = s.site_df
     
+    else:
+        raise ValueError(f"未知的 site_type: '{site_type}'。必须是 'ontop', 'bridge', 'hollow', 或 'all'。")
+
+    # --- 3. 可选的表面原子过滤 ---
+    allowed_symbols = plan_solution.get("surface_binding_atoms")
+    if allowed_symbols and len(allowed_symbols) > 0:
+        print(f"--- 🛠️ 正在按表面符号过滤: {allowed_symbols} ---")
+        
+        def check_symbols(site_formula_dict):
+            if not site_formula_dict or not isinstance(site_formula_dict, dict):
+                return False
+            # 检查此位点的 *任何* 原子是否在允许列表中
+            return any(symbol in allowed_symbols for symbol in site_formula_dict.keys())
+
+        initial_count = len(site_df_filtered)
+        site_df_filtered = site_df_filtered[
+            site_df_filtered['site_formula'].apply(check_symbols)
+        ]
+        print(f"--- 🛠️ 表面符号过滤：位点从 {initial_count} 个减少到 {len(site_df_filtered)} 个。 ---")
+
     # 将 s.site_df 替换为过滤后的 df
     s.site_df = site_df_filtered
     site_index_arg = list(s.site_df.index)
     
-    print(f"--- 🛠️ 规划已验证：正在搜索 {len(site_index_arg)} 个 '{site_type}' 位点以用于 '{plan_orientation}' 吸附。 ---")
+    print(f"--- 🛠️ 规划已验证：正在搜索 {len(site_index_arg)} 个 '{site_type}' (过滤后) 位点以用于 '{plan_orientation}' 吸附。 ---")
 
     if len(site_index_arg) == 0:
-        raise ValueError(f"未找到 '{site_type}' 类型的位点。无法继续。")
+        raise ValueError(f"未找到 '{site_type}' 类型且包含 {allowed_symbols} 的位点。无法继续。")
 
-    # --- 3. 决定 sample_rotation ---
+    # --- 4. 决定 sample_rotation ---
     sample_rotation = True
     if plan_orientation == "side-on":
         print("--- 🛠️ 检测到 'side-on' 模式。禁用 sample_rotation。---")
         sample_rotation = False
 
-    # --- 4. 调用库 ---
-    # 我们仍然依赖 _get_fragment 中的“SMILES 技巧”来使
-    # 底层的 s.get_populated_sites [autoadsorbate.py:331] 工作。
-    
+    # --- 5. 调用库 ---
     print(f"--- 🛠️ 正在调用 s.get_populated_sites (cap={conformers_per_site_cap}, overlap={overlap_thr})... ---")
     
     out_trj = s.get_populated_sites(
-      fragment=fragment_object, # 传递完整的 Fragment 对象
+      fragment=fragment_object,
       site_index=site_index_arg,
       sample_rotation=sample_rotation,
-      mode='all', # 我们已经自己完成了 'heuristic' 过滤
+      mode='all',
       conformers_per_site_cap=conformers_per_site_cap,
-      overlap_thr=overlap_thr,      
+      overlap_thr=overlap_thr,
       verbose=True
     )
     

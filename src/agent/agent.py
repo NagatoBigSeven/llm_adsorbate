@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import scipy
 import sklearn
+from rdkit import Chem
 import ase
 from  ase.io import read, write
 import autoadsorbate
@@ -121,6 +122,21 @@ def solution_planner_node(state: AgentState) -> dict:
 def plan_validator_node(state: AgentState) -> dict:
     """ 节点 2: Python 验证器 """
     print("--- 🐍 调用 Python 验证器节点 ---")
+
+    try:
+        # 使用 state["smiles"] (来自初始输入) 而不是 plan 中的任何内容
+        mol = Chem.MolFromSmiles(state["smiles"])
+        if not mol:
+            raise ValueError(f"RDKit 返回 None。SMILES 可能无效或包含 RDKit 无法处理的价态。")
+    except Exception as e:
+        error = f"False, 基础 SMILES 字符串 '{state['smiles']}' 无法被 RDKit 解析。这是一个无法修复的错误。请检查 SMLIES。错误: {e}"
+        print(f"--- 验证失败: {error} ---")
+        # 这是一个致命错误；我们应该停止重试。
+        # 我们通过设置一个特殊的 validation_error 来通知路由
+        # 注意：理想情况下，图应该有一个 "terminal_failure" 状态，
+        # 但目前我们只能返回给 planner，并期望它在 N 次后停止。
+        return {"validation_error": error, "plan": None} # 清除 plan
+
     plan_json = state.get("plan")
     if plan_json is None:
         print("--- 验证失败: Planner未能生成有效JSON。---")
@@ -191,14 +207,14 @@ def tool_executor_node(state: AgentState) -> dict:
             original_smiles=state["smiles"],
             binding_atom_indices=plan_solution.get("adsorbate_binding_indices"),
             orientation=plan_solution.get("orientation"),
-            to_initialize=5
+            to_initialize=plan_solution.get("conformers_per_site_cap", 5)
         )
         tool_logs.append(f"成功: 已从规划中生成片段对象 (SMILES: {state['smiles']})。")
 
         generated_traj_file = populate_surface_with_fragment(
             slab_atoms=slab_atoms,
             fragment_object=fragment_object,
-            site_type=plan_solution.get("site_type"),
+            plan_solution=plan_solution
         )
         tool_logs.append(f"成功: 已将片段放置在 slab 上。构型保存在: {generated_traj_file}")
 
