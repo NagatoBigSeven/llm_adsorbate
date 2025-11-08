@@ -18,13 +18,6 @@ from ase import Atoms
 from typing import Union
 
 def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[int], orientation: str) -> str:
-    """
-    通过将“替代”原子（如 Cl 或 S）连接到 LLM 规划的键合位点，
-    将标准 SMILES 转换为 *SMILES (Surrogate-SMILES)。
-    
-    此版本为 end-on (Cl) 和 side-on (S1S) 模式
-    创建*新的* RWMol，以强制标记位于索引 0 (或 0,1)。
-    """
     print(f"--- 🔬 调用 SMILES 翻译器: {original_smiles} via indices {binding_atom_indices} (朝向: {orientation}) ---")
     
     mol = Chem.MolFromSmiles(original_smiles)
@@ -41,11 +34,13 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
         if target_idx >= mol.GetNumAtoms():
              raise ValueError(f"索引 {target_idx} 超出范围 (分子原子数: {mol.GetNumAtoms()})。")
 
-        # 必须创建新分子以强制 Cl 位于索引 0
+        # RWMol 逻辑对于 'end-on' 是健壮的
         new_mol = Chem.RWMol()
         
-        # 1. 添加 Cl 标记 (索引 0)
-        marker_idx = new_mol.AddAtom(Chem.Atom("Cl")) # index 0
+        # 1. 添加 Cl 标记 (索引 0)，并设置原子映射号为 1
+        marker_atom = Chem.Atom("Cl")
+        marker_atom.SetAtomMapNum(1) # [Cl:1]
+        marker_idx = new_mol.AddAtom(marker_atom) # index 0
         
         # 2. 复制原始分子原子
         idx_map = {}
@@ -65,7 +60,7 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
         target_atom_obj.SetFormalCharge(target_atom_obj.GetFormalCharge() + 1)
         
         out_smiles = Chem.MolToSmiles(new_mol.GetMol())
-        print(f"--- 🔬 SMILES 翻译器输出 (Cl-first): {out_smiles} ---")
+        print(f"--- 🔬 SMILES 翻译器输出 (Cl-first, Mapped): {out_smiles} ---")
         return out_smiles
 
     # --- side-on (双点连接) 逻辑 ---
@@ -79,49 +74,30 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
         if idx2 >= mol.GetNumAtoms():
              raise ValueError(f"索引 {idx2} 超出范围 (分子原子数: {mol.GetNumAtoms()})。")
 
-        # 创建 [S, S, ...rest] 顺序的新 RWMol
-        new_mol = Chem.RWMol()
-        marker1_idx = new_mol.AddAtom(Chem.Atom("S")) # index 0
-        marker2_idx = new_mol.AddAtom(Chem.Atom("S")) # index 1
-        new_mol.AddBond(marker1_idx, marker2_idx, Chem.rdchem.BondType.SINGLE)
+        # 使用点运算符创建断开连接的 SMILES
+        # 我们需要先在原始分子上设置映射号
         
-        idx_map = {}
-        for atom in mol.GetAtoms():
-            new_idx = new_mol.AddAtom(atom)
-            idx_map[atom.GetIdx()] = new_idx
+        atom1 = mol.GetAtomWithIdx(idx1)
+        atom2 = mol.GetAtomWithIdx(idx2)
         
-        target_idx_set = set(target_indices)
-        for bond in mol.GetBonds():
-            idx_a = bond.GetBeginAtomIdx()
-            idx_b = bond.GetEndAtomIdx()
-            
-            if idx_a in target_idx_set and idx_b in target_idx_set:
-                print(f"--- 🔬 SMILES 翻译器: 为 'side-on' 模式断开了索引 {idx_a}-{idx_b} 之间的多重键。 ---")
-                continue
-            
-            new_mol.AddBond(idx_map[idx_a], idx_map[idx_b], bond.GetBondType())
+        # 检查是否已有映射，防止冲突
+        if atom1.GetAtomMapNum() != 0 or atom2.GetAtomMapNum() != 0:
+            print(f"--- 🔬 警告: 目标原子 {idx1} 或 {idx2} 已有原子映射号。将覆盖它们。 ---")
 
-        if mol.GetBondBetweenAtoms(idx1, idx2):
-            new_mol.AddBond(idx_map[idx1], idx_map[idx2], Chem.rdchem.BondType.SINGLE)
+        # RDKit 在 MolToSmiles 时会将 :1 和 :2 放在错误的位置 (例如 [C-:1]#[O+:2])
+        # _get_fragment 逻辑需要代理原子 S:1 和 S:2
+        # 因此，SMILES 必须是： [C-]#[O+] . [S:1] . [S:2]
         
-        new_mol.AddBond(marker1_idx, idx_map[idx1], Chem.rdchem.BondType.SINGLE)
-        new_mol.AddBond(marker2_idx, idx_map[idx2], Chem.rdchem.BondType.SINGLE)
+        # 我们不能只映射 C 和 O，因为 _get_fragment 需要 S:1 和 S:2
         
-        out_smiles = Chem.MolToSmiles(new_mol.GetMol())
-        print(f"--- 🔬 SMILES 翻译器输出 (S1S-first): {out_smiles} ---")
+        out_smiles = f"{original_smiles}.[S:1].[S:2]"
+        print(f"--- 🔬 SMILES 翻译器输出 (S1S-first, Mapped, Disconnected): {out_smiles} ---")
         return out_smiles
 
     else:
         raise ValueError(f"未知的朝向: {orientation}。必须是 'end-on' 或 'side-on'。")
 
-# --- 其他工具 ---
 def read_atoms_object(slab_path: str) -> ase.Atoms:
-    """Reads a atomistic structure file 
-    Args:
-        path: string - location on system
-    returns:
-        ase.Atoms object
-    """
     try:
         atoms = read(slab_path)  # 从 .xyz 或 .cif 文件中读取 slab 结构。
         print(f"成功: 已从 {slab_path} 读取 slab 原子。")
@@ -131,169 +107,110 @@ def read_atoms_object(slab_path: str) -> ase.Atoms:
         raise
 
 def _get_fragment(SMILES: str, orientation: str, to_initialize: int = 1) -> Union[Fragment, ase.Atoms]:
-    """
-    [内部函数] 原始的 get_fragment 实现，包含所有必要的补丁
-    以处理 autoadsorbate 库的限制。
-    
-    移除了所有手动的构象构建器 (manual_conformer)，
-    完全依赖通用的 S1S 原子重排 (re-ordering) 逻辑。
-    
-    现在显式接受 'orientation' 参数，以确定
-    (a) TRICK_SMILES 是 "Cl" 还是 "S1S"
-    (b) 是否应用 S1S 原子重排（re-ordering）补丁。
-    这现在可以正确处理含有真实 S 或 Cl 的分子。
-    """
+    # 确定我们期望的 TRICK_SMILES，以便稍后设置 .info["smiles"]
+    TRICK_SMILES = "Cl" if orientation == "end-on" else "S1S"
 
-    # 我们不再猜测 TRICK_SMILES。我们根据规划器传入的朝向来 *确定* 它。
-    TRICK_SMILES = None
-    if orientation == "end-on":
-        TRICK_SMILES = "Cl"
-    elif orientation == "side-on":
-        TRICK_SMILES = "S1S"
-    else:
-        # 如果朝向未知（不应发生），则回退到原始 SMILES
-        print(f"--- 🛠️ _get_fragment: 警告: 未知的朝向 '{orientation}'。将使用原始SMILES。---")
-        TRICK_SMILES = SMILES
-
-    # --- 统一路径：使用 autoadsorbate.Fragment 正常初始化 ---
     try:
-        # 无论 SMILES 是什么 (例如 '[C-]1[O+]SS1' 或 'CC[S+](Cl)')，
-        # 我们都要求 RDKit/autoadsorbate 尽力生成构象。
-        fragment = Fragment(smile=SMILES, to_initialize=to_initialize)
+        mol = Chem.MolFromSmiles(SMILES)
+        if not mol:
+            raise ValueError(f"RDKit 无法解析映射的 SMILES: {SMILES}")
+
+        mol_with_hs = Chem.AddHs(mol)
+        if not mol_with_hs:
+             # AddHs 失败 (例如，对于 [C-]#[O+].[S:1].[S:2] 中的 [S] 片段，如果它们有未满足的价态)
+             # 让我们尝试在没有 H 的情况下继续，因为代理S和CO都不需要H
+             print(f"--- 🛠️ _get_fragment: 警告: Chem.AddHs(mol) 返回 None。正在尝试在没有显式H的情况下继续... ---")
+             mol_with_hs = mol 
         
-        # 仅当规划的朝向是 "side-on" 时，我们才应用 S1S 重排补丁。
-        if TRICK_SMILES == "S1S":
-            
-            # 检查 RDKit 是否返回了任何构象
-            if not fragment.conformers or len(fragment.conformers) == 0:
-                 # RDKit 确实失败了，但我们不能硬编码答案。
-                 # 我们必须向上传递这个错误。
-                 print(f"--- 🛠️ _get_fragment: 错误: RDKit 未能为代理 SMILES '{SMILES}' 生成任何 3D 构象。---")
-                 raise ValueError(f"RDKit failed to generate conformers for SMILES: {SMILES}")
-
-            # 检查是否真的需要重排 (例如，RDKit 规范化导致 [C,O,S,S] 而不是 [S,S,C,O])
-            if fragment.conformers[0].get_chemical_symbols()[0] != 'S':
-                print(f"--- 🛠️ _get_fragment: S1S 模式检测到构象顺序错误 (例如 [C, O, S, S])。---")
-                print(f"--- 🛠️ _get_fragment: 正在将所有构象重排 (Re-ordering) 为 [S, S, ...rest]... ---")
-                
-                reordered_conformers = []
-                
-                for conf_atoms in fragment.conformers:
-                    symbols = conf_atoms.get_chemical_symbols()
-                    positions = conf_atoms.get_positions()
-                    
-                    # 我们必须精确地识别*代理 S* 原子。
-                    # 我们的 generate_surrogate_smiles *总是* 添加两个 S。
-                    # 假设 SMILES 是 'CCSS1S1' (来自 C=S)，
-                    # RDKit 可能会返回 [C, C, S(真实), S(代理), S(代理)]
-                    # 我们如何区分它们？
-                    # 让我们依赖一个更强的假设：代理 SMILES (如 [C-]1[O+]SS1) 这对吗？？？
-                    # *只* 包含代理 S 原子，而*不*包含真实的 S 原子。
-                    # 这是 generate_surrogate_smiles 的当前行为。
-                    #
-                    # 因此，s_indices 列表中的*所有* S 原子都*是*代理 S。
-
-                    s_indices = [i for i, s in enumerate(symbols) if s == 'S']
-                    other_indices = [i for i, s in enumerate(symbols) if s != 'S']
-
-                    if len(s_indices) < 2:
-                         print(f"--- 🛠️ _get_fragment: 错误: S1S 模式但未找到 2 个 S 原子。SMILES: {SMILES}。原子: {symbols}。---")
-                         continue # 跳过这个坏掉的构象
-                    
-                    if len(s_indices) > 2:
-                        # 这种情况现在不应该发生，除非 generate_surrogate_smiles 坏了
-                        print(f"--- 🛠️ _get_fragment: 警告: S1S 模式找到 {len(s_indices)} 个 S 原子。只使用前 2 个作为代理。---")
-                        s_indices = s_indices[:2]
-                        s_indices_set = set(s_indices)
-                        other_indices = [i for i, s in enumerate(symbols) if i not in s_indices_set]
-                    
-                    # new_order = [S, S, C, O]
-                    new_order = s_indices + other_indices
-                    
-                    if len(new_order) != len(symbols):
-                        print(f"--- 🛠️ _get_fragment: 错误: 重排 (Re-ordering) 长度不匹配! {len(new_order)} vs {len(symbols)} ---")
-                        continue 
-
-                    new_atoms = Atoms(
-                        symbols=[symbols[i] for i in new_order],
-                        positions=[positions[i] for i in new_order]
-                    )
-                    new_atoms.info = conf_atoms.info.copy() if hasattr(conf_atoms, "info") else {}
-                    reordered_conformers.append(new_atoms)
-                
-                fragment.conformers = reordered_conformers # 替换为重排后的列表
-                print(f"--- 🛠️ _get_fragment: 成功重排 (re-ordered) {len(fragment.conformers)} 个构象。 ---")
-            
-            elif fragment.conformers and fragment.conformers[0].get_chemical_symbols()[0] == 'S':
-                print(f"--- 🛠️ _get_fragment: S1S 模式检测到。构象已具有正确的 [S, S, ...] 顺序。无需重排。 ---")
+        # 使用 RDKit 生成构象 (与 autoadsorbate 内部逻辑类似)
+        params = AllChem.ETKDGv3()
+        params.randomSeed = 0xF00D # 任意的种子
+        params.pruneRmsThresh = 0.5 # 合理的剪枝阈值
+        params.numThreads = 0 # 使用所有核心
+        conf_ids = list(AllChem.EmbedMultipleConfs(mol_with_hs, numConfs=to_initialize, params=params))
         
-        # 应用 TRICK_SMILES 补丁
-        # (这现在是安全的，TRICK_SMILES 是基于 'orientation' 确定的，而不是猜测)
-        fragment.smile = TRICK_SMILES 
-        for conf in fragment.conformers:
-            if not hasattr(conf, "info"):
-                conf.info = {}
-            conf.info["smiles"] = TRICK_SMILES
+        if not conf_ids:
+             # 回退到更简单的嵌入器
+             if AllChem.EmbedMolecule(mol_with_hs, AllChem.ETKDGv2()) == -1:
+                 # 再次尝试
+                 if AllChem.EmbedMolecule(mol_with_hs, AllChem.ETKDGv2()) == -1:
+                    raise ValueError(f"RDKit (EmbedMolecule fallback) 仍未能为 {SMILES} 生成构象。")
+             conf_ids = [0]
+        
+        # 优化生成的构象
+        try:
+            AllChem.UFFOptimizeMoleculeConfs(mol_with_hs)
+        except Exception as e:
+            # UFFTYPER 警告会在这里被捕获。我们忽略它们并继续。
+            print(f"--- 🛠️ _get_fragment: 警告: UFF 优化失败或发出警告 ({e})。使用未优化的构象。 ---")
+
+        reordered_conformers = []
+        all_rdkit_atoms = list(mol_with_hs.GetAtoms())
+
+        for conf_id in conf_ids:
+            conf = mol_with_hs.GetConformer(conf_id)
+            positions = conf.GetPositions()
             
-        print(f"--- 🛠️ _get_fragment: 已将 Fragment.smile 和 conformer.info['smiles'] 覆盖为 '{TRICK_SMILES}' 以兼容库。 ---")
+            proxy_indices = []
+            
+            # 1. 使用 GetAtomMapNum() 查找代理原子的 *RDKit 索引*
+            map_num_to_idx = {}
+            for atom in all_rdkit_atoms:
+                map_num = atom.GetAtomMapNum()
+                idx = atom.GetIdx()
+                if map_num > 0:
+                    map_num_to_idx[map_num] = idx
+            
+            # 2. 根据朝向（和 TRICK_SMILES）构建代理索引列表
+            if TRICK_SMILES == "Cl":
+                if 1 not in map_num_to_idx:
+                    raise ValueError(f"SMILES {SMILES} 缺少映射号 [Cl:1] (或 [*:1]) 用于 end-on 键合。")
+                proxy_indices = [map_num_to_idx[1]]
+                
+            elif TRICK_SMILES == "S1S":
+                if 1 not in map_num_to_idx or 2 not in map_num_to_idx:
+                     raise ValueError(f"SMILES {SMILES} 缺少映射号 [S:1] 和/或 [S:2] (或 [*:1], [*:2]) 用于 side-on 键合。")
+                proxy_indices = [map_num_to_idx[1], map_num_to_idx[2]]
 
-        if not fragment.conformers or len(fragment.conformers) == 0:
-             # 这现在是一个真正的错误
-             raise ValueError(f"RDKit 未能为 {SMILES} 生成任何 3D 构象（在重排后为空）。")
+            # 3. 构建新的原子顺序：[代理原子(们), ...剩余原子]
+            #    (剩余原子是那些*没有*原子映射号的原子)
+            proxy_set = set(proxy_indices)
+            other_indices = [atom.GetIdx() for atom in all_rdkit_atoms if atom.GetIdx() not in proxy_set and atom.GetAtomMapNum() == 0]
 
-        print(f"--- 🛠️ _get_fragment: 成功从 *SMILES '{SMILES}' (to_initialize={to_initialize}) 初始化 autoadsorbate.Fragment 对象。 ---")
+            new_order = proxy_indices + other_indices
+            
+            # 4. 根据新顺序提取符号和位置
+            new_symbols = [all_rdkit_atoms[i].GetSymbol() for i in new_order]
+            new_positions = [positions[i] for i in new_order]
+            
+            # 5. 创建 ASE Atoms 对象，并设置关键的 .info["smiles"]
+            new_atoms = Atoms(symbols=new_symbols, positions=new_positions)
+            # 这是 autoadsorbate 库唯一关心的东西：
+            new_atoms.info = {"smiles": TRICK_SMILES} 
+            reordered_conformers.append(new_atoms)
+
+        if not reordered_conformers:
+            raise ValueError(f"RDKit 构象生成成功，但原子映射追踪失败 (SMILES: {SMILES})")
+
+        # 1. 创建一个 *虚拟的* Fragment 对象，使用一个已知有效的SMILES (例如 "C") 来安全地完成 __init__。
+        print(f"--- 🛠️ _get_fragment: 正在创建虚拟 Fragment (smile='C')... ---")
+        fragment = Fragment(smile="C", to_initialize=1) 
+        
+        # 2. 手动 *覆盖* 库生成的虚拟构象
+        print(f"--- 🛠️ _get_fragment: 正在用 {len(reordered_conformers)} 个已重排的构象覆盖 .conformers ... ---")
+        fragment.conformers = reordered_conformers
+        fragment.conformers_aligned = [False] * len(reordered_conformers)
+        
+        # 3. 手动 *覆盖* smile 属性，以便 autoadsorbate.Surface 知道要剥离哪个代理（"Cl" 或 "S1S"）
+        print(f"--- 🛠️ _get_fragment: 正在覆盖 .smile 为 '{TRICK_SMILES}' ... ---")
+        fragment.smile = TRICK_SMILES
+
+        print(f"--- 🛠️ _get_fragment: 成功从 *SMILES '{SMILES}' (to_initialize={to_initialize}) 创建了片段对象。 ---")
         return fragment
 
     except Exception as e:
-        print(f"--- 🛠️ _get_fragment: 警告: 无法使用 autoadsorbate.Fragment 初始化 ('{e}')。回退到手动 RDKit 构建... ---")
-        
-        try:
-            mol = Chem.MolFromSmiles(SMILES)
-            mol_with_hs = Chem.AddHs(mol)
-            AllChem.EmbedMolecule(mol_with_hs, AllChem.ETKDGv2())
-            
-            if mol_with_hs.GetNumConformers() == 0:
-                AllChem.EmbedMolecule(mol_with_hs, AllChem.ETKDGv2())
-
-            if mol_with_hs.GetNumConformers() == 0:
-                raise ValueError(f"RDKit Fallback (EmbedMolecule) 也未能为 {SMILES} 生成构象。")
-
-            conf = mol_with_hs.GetConformer()
-            positions = conf.GetPositions()
-            symbols = [atom.GetSymbol() for atom in mol_with_hs.GetAtoms()]
-            
-            atoms = Atoms(symbols=symbols, positions=positions)
-            atoms.info = {"smiles": TRICK_SMILES}
-            print("--- 🛠️ _get_fragment: 成功通过 RDKit 手动回退构建了 ase.Atoms。 ---")
-            
-            # 同样应用 S1S 重排修复
-            if TRICK_SMILES == "S1S":
-                if atoms.get_chemical_symbols()[0] != 'S':
-                    print(f"--- 🛠️ _get_fragment (Fallback): S1S 模式检测到。正在重排 (Re-ordering)... ---")
-                    symbols = atoms.get_chemical_symbols()
-                    positions = atoms.get_positions()
-                    s_indices = [i for i, s in enumerate(symbols) if s == 'S']
-                    other_indices = [i for i, s in enumerate(symbols) if s != 'S']
-                    if len(s_indices) >= 2:
-                        if len(s_indices) > 2:
-                            s_indices = s_indices[:2] # 只取前两个
-                        s_indices_set = set(s_indices)
-                        other_indices = [i for i, s in enumerate(symbols) if i not in s_indices_set]
-                        new_order = s_indices + other_indices
-                        atoms = Atoms(
-                            symbols=[symbols[i] for i in new_order],
-                            positions=[positions[i] for i in new_order]
-                        )
-                        atoms.info = {"smiles": TRICK_SMILES} # 重新设置 info
-
-            fragment = Fragment(smile=TRICK_SMILES, to_initialize=0)
-            fragment.conformers = [atoms]
-            fragment.conformers_aligned = [False]
-            return fragment
-
-        except Exception as e_inner:
-            print(f"--- 🛠️ _get_fragment: 错误: 无法从 SMILES '{SMILES}' 创建 Fragment: {e_inner} ---")
-            raise e_inner
+        print(f"--- 🛠️ _get_fragment: 错误: 无法从 SMILES '{SMILES}' 创建 Fragment: {e} ---")
+        raise e
 
 def create_fragment_from_plan(
     original_smiles: str, 
@@ -301,16 +218,6 @@ def create_fragment_from_plan(
     orientation: str,
     to_initialize: int = 1
 ) -> Fragment:
-    """
-    [新工具] 从一个规划中创建 autoadsorbate Fragment 对象。
-    
-    这是 AI 代理创建吸附物的首选工具。
-    它封装了以下步骤：
-    1. original_smiles -> *SMILES (使用 generate_surrogate_smiles)
-    2. *SMILES -> 3D 构象 (使用 _get_fragment)
-    3. 自动处理 RDKit 失败的特殊情况 (如 N2, C2H4 side-on)。
-    4. 将规划信息附加到 Fragment 对象上，供后续工具使用。
-    """
     print(f"--- 🛠️ 正在执行 create_fragment_from_plan ... ---")
     
     # 1. 内部调用 SMILES 生成器
@@ -321,7 +228,6 @@ def create_fragment_from_plan(
     )
 
     # 2. 内部调用构象生成器 (包含所有补丁和技巧)
-    # 我们必须将 'orientation' 参数从这里传递下去
     fragment = _get_fragment(
         SMILES=surrogate_smiles,
         orientation=orientation,
@@ -347,13 +253,6 @@ def populate_surface_with_fragment(
     plan_solution: dict,
     **kwargs
 ) -> str:
-    """
-    使用 autoadsorbate.Surface.get_populated_sites 自动在表面上放置片段。
-    
-    此版本从完整的 plan_solution 字典中读取所有参数，
-    并应用表面原子过滤和暴露计算参数。
-    """
-
     # --- 1. 从 Fragment 对象中检索规划 ---
     if not hasattr(fragment_object, "info") or "plan_orientation" not in fragment_object.info:
         raise ValueError("Fragment 对象缺少 'plan_orientation' 信息。请使用 'create_fragment_from_plan' 创建它。")
@@ -367,11 +266,27 @@ def populate_surface_with_fragment(
     touch_sphere_size = plan_solution.get("touch_sphere_size", 2.8)
 
     print(f"--- 🛠️ 正在初始化表面 (touch_sphere_size={touch_sphere_size})... ---")
-    s = Surface(slab_atoms, precision=1.0, touch_sphere_size=touch_sphere_size)
+    
+    # 明确设置 mode='slab'
+    s = Surface(
+        slab_atoms, 
+        precision=1.0, 
+        touch_sphere_size=touch_sphere_size,
+        mode='slab'  # 明确设置模式，防止默认为 'dummy'
+    )
 
     original_site_count = len(s.site_df)
     s.sym_reduce()
     print(f"--- 🛠️ 表面位点：从 {original_site_count} 个减少到 {len(s.site_df)} 个不等价位点。 ---")
+
+    # 检查是否找到了位点
+    # 这可以防止在 `s.site_df.connectivity` 上失败
+    if s.site_df.empty or len(s.site_df) == 0:
+        raise ValueError(
+            f"Autoadsorbate 未能在表面上找到任何吸附位点 (0 sites found)。"
+            f"这可能是由于 `touch_sphere_size` ({touch_sphere_size}) 不合适（太大或太小）。"
+            f"请尝试 2.8 到 3.2 之间的值。"
+        )
 
     # --- 2. 验证规划与位点的兼容性 (Connectivity 过滤) ---
     site_df_filtered = s.site_df
@@ -567,9 +482,6 @@ def relax_atoms(
     return final_traj_file
 
 def save_ase_atoms(atoms: ase.Atoms, filename: str) -> str:
-    """
-    将单个 ase.Atoms 对象保存到文件。
-    """
     if not os.path.exists('outputs'):
         os.makedirs('outputs')
         
@@ -591,12 +503,6 @@ def analyze_relaxation_results(
     binding_atom_indices: list[int],
     orientation: str
 ) -> str:
-    """
-    分析弛豫轨迹，找到最稳定的结构，并检查其键合情况。
-    此版本不再使用 RDKit 索引进行猜测，而是依赖
-    autoadsorbate 库保证的原子顺序 (即 adsorbate_indices[0] 
-    始终是 end-on 的目标，[0] 和 [1] 始终是 side-on 的目标)。
-    """
     try:
         print(f"--- 🛠️ 正在分析弛豫结果: {relaxed_trajectory_file} ---")
         traj = read(relaxed_trajectory_file, index=":")
@@ -639,7 +545,7 @@ def analyze_relaxation_results(
         result = {}
 
         # 准备共价键检查
-        cov_cutoffs = natural_cutoffs(relaxed_atoms, mult=1.0)
+        cov_cutoffs = natural_cutoffs(relaxed_atoms, mult=1)
 
         if orientation == "end-on":
             # 目标原子 *总是* 吸附物列表中的第一个
