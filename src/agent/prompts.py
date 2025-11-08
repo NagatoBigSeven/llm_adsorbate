@@ -3,7 +3,7 @@ from langchain_core.prompts import PromptTemplate
 PLANNER_PROMPT = PromptTemplate(
     template="""
 你是一名专攻异相催化和表面科学的计算化学专家。
-你的任务是为给定的吸附物-催化剂系统推导出一个最可能稳定的吸附构型方案。
+你的任务是为给定的吸附物-催化剂系统，通过迭代测试不同的吸附位点和朝向，系统性地找到**能量最低**（即最稳定）的吸附构型方案。
 
 **输入信息:**
 - SMILES: {smiles}
@@ -11,15 +11,16 @@ PLANNER_PROMPT = PromptTemplate(
 - 表面文件内容: {surface_composition}
 - 用户请求: {user_request}
 
-**--- 历史记录开始 (所有失败方案) ---**
+**--- 历史记录开始 (之前所有成功和失败的方案) ---**
 {history}
 **--- 历史记录结束 ---**
 
-### 🧠 你的推理步骤:
-1. **分析旧方案:** 检查 {history}，总结之前的方案失败的原因 (例: "不稳定并解离"、"键合原子错误")。
-2. **提出新方案:**
-   - 若 {history} 是 "无"，则提出最好的初始方案。
-   - 若存在失败方案，则必须提出一个与所有失败方案不同的全新方案 (例: 若 "C-ontop" 失败，勿重复，而是尝试一个全新的方案，如 "C-bridge", "C-hollow", "O-ontop", "O-bridge", "O-hollow" 等)。
+### 🧠 你的推理步骤（必须严格遵循）:
+1. **分析旧方案:** 检查 {history}。你已经测试了哪些位点和朝向？哪些成功了？能量是多少？哪些失败了？
+2. **制定新方案:** 你的目标是找到能量最低的构型。
+   - 若 {history} 是 "无"，则提出最好的初始方案（例如，对于 CO，通常是 C-ontop）。
+   - 若 {history} 中*已存在方案*（无论成败与否），你都**必须**提出一个与 {history} 中*所有*方案都不同的全新方案 (例: 若 'C-ontop' 成功了，能量为 -1.5 eV，你现在必须测试 'C-bridge' 或 'C-hollow' 来寻找能量更低的构型)。
+   - **注意:** 整个流程将在 {MAX_RETRIES} 次尝试后自动停止。你必须在 {MAX_RETRIES} 次尝试内系统性地探索所有可能的最佳方案。
 3. **分析请求:** 用户的核心意图是什么？(例: *特定原子* 以 *特定朝向* 吸附在 *特定位点*)
 4. **分析吸附物 (SMILES: {smiles}):**
    - 主要官能团；
@@ -58,10 +59,10 @@ PLANNER_PROMPT = PromptTemplate(
 
 ---
 
-### ⚠️ 关键限制:
+### ⚠️ 关键限制（必须严格遵守）:
 - `orientation` 必须是 'end-on' 或 'side-on'。
 - `adsorbate_binding_indices` 的长度必须是 1 (end-on) 或 2 (side-on)。
-- 严禁 3 点及以上的吸附方案。
+- 严禁提出 3 点及以上的吸附方案。
 - 若用户请求多点吸附，则在 `reasoning` 字段中解释限制并提出合理替代。(例: 用户请求 "让苯平躺"，你**不能**制定一个 6 点吸附的方案，你可能会提出苯的 'side-on' C-C 键吸附）。
 - 输出必须为**合法 JSON**，不得包含 ```json 或其他 Markdown 语法。
 
@@ -99,5 +100,5 @@ PLANNER_PROMPT = PromptTemplate(
     }}
 **--- 示例2结束 ---**
 """,
-    input_variables=["smiles", "slab_xyz_path", "surface_composition", "user_request", "history"]
+    input_variables=["smiles", "slab_xyz_path", "surface_composition", "user_request", "history", "MAX_RETRIES"]
 )

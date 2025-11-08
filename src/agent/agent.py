@@ -33,6 +33,8 @@ from src.tools.tools import (
 )
 from src.agent.prompts import PLANNER_PROMPT
 
+MAX_RETRIES = 4
+
 # --- 1. 定义智能体状态 (Agent State) ---
 class AgentState(TypedDict):
     smiles: str
@@ -107,7 +109,8 @@ def solution_planner_node(state: AgentState) -> dict:
         "slab_xyz_path": state["slab_path"],
         "surface_composition": state.get("surface_composition", "未知"),
         "user_request": state["user_request"],
-        "history": "\n".join(state["history"]) if state.get("history") else "无"
+        "history": "\n".join(state["history"]) if state.get("history") else "无",
+        "MAX_RETRIES": MAX_RETRIES
     }
     
     if state.get("validation_error"):
@@ -364,22 +367,31 @@ def route_after_validation(state: AgentState) -> str:
         print(f"--- 决策: 方案通过，前往执行 ---")
         return "tool_executor"
 
+import json # 确保 json 已导入
+...
+
 def route_after_analysis(state: AgentState) -> str:
     """
-    检查计算是否真正成功。
-    增强了失败报告功能，以正确处理 end-on 和 side-on 构型。
+    检查计算结果，记录成功或失败，并始终返回规划器继续搜索。
+    只有在达到重试上限时才停止。
     """
     print("--- 🤔 Python 决策分支 3 (分析器) ---")
+    current_history = state.get("history", [])
+    history_entry = ""
     try:
         analysis_data = json.loads(state.get("analysis_json", "{}"))
         status = analysis_data.get("status")
         is_bound = analysis_data.get("is_covalently_bound", False) 
+        plan_str = json.dumps(state.get("plan", "{}"))
 
         if status == "success" and is_bound:
-            print("--- 决策: 计算成功且稳定键合。流程结束。 ---")
-            return "end"
+            # --- 成功逻辑 ---
+            energy = analysis_data.get("most_stable_energy_eV", "N/A")
+            history_entry = f"成功的尝试: Plan={plan_str}, Result=键合成功, 能量={energy:.4f} eV。"
+            print(f"--- 决策: 找到稳定键合 (E={energy:.4f} eV)。记录并返回规划器继续搜索... ---")
+
         else:
-            plan_str = json.dumps(state.get("plan", "{}"))
+            # --- 失败逻辑 ---
             fail_reason = analysis_data.get("message", "计算失败或未键合。")
             if status == "success" and not is_bound:
                 if "atom_1" in analysis_data and "atom_2" in analysis_data: # side-on
@@ -397,23 +409,21 @@ def route_after_analysis(state: AgentState) -> str:
                     fail_reason = analysis_data.get("message", "分析完成，但 is_covalently_bound 为 false。")
 
             history_entry = f"失败的尝试: Plan={plan_str}, Result={fail_reason}"
-            
-            current_history = state.get("history", [])
-            current_history.append(history_entry)
-
-            if len(current_history) > 3:
-                print(f"--- 决策: 已达到 {len(current_history)} 次重试上限。流程结束。 ---")
-                return "end"
-            
-            state["history"] = current_history
-            
-            print(f"--- 决策: 计算失败 ({fail_reason})。返回规划器重试。 ---")
-            return "planner"
+            print(f"--- 决策: 计算失败 ({fail_reason})。记录并返回规划器重试。 ---")
 
     except Exception as e:
         print(f"--- 决策: 分析路由失败 ({e})。返回规划器重试。 ---")
-        state["history"] = state.get("history", []) + [f"分析路由失败: {e}"]
-        return "planner"
+        history_entry = f"分析路由失败: {e}"
+
+    # --- 统一的路由逻辑 ---
+    current_history.append(history_entry)
+    state["history"] = current_history
+
+    if len(current_history) > MAX_RETRIES:
+        print(f"--- 决策: 已达到 {len(current_history)} 次尝试上限。流程结束。 ---")
+        return "end" # 达到上限，停止
+    
+    return "planner" # 未达到上限，继续搜索
 
 # --- 5. 构建并编译图 (Graph) ---
 def get_agent_executor():
