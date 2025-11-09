@@ -213,7 +213,6 @@ def plan_validator_node(state: AgentState) -> dict:
     print("--- 验证成功 ---")
     return {"validation_error": None}
 
-
 def tool_executor_node(state: AgentState) -> dict:
     """ 节点 4: Tool Executor """
     print("--- 🛠️ 调用 Tool Executor 节点 ---")
@@ -224,7 +223,7 @@ def tool_executor_node(state: AgentState) -> dict:
         error_message = "Tool Executor 失败: 'plan' 中缺少 'solution' 字典。"
         print(f"--- 🛑 {error_message} ---")
         return {
-            "messages": [ToolMessage(content=error_message, tool_call_id="executor_run")],
+            "messages": [ToolMessage(content=error_message, tool_call_id="tool_executor")],
             "analysis_json": json.dumps({"status": "error", "message": error_message})
         }
 
@@ -277,6 +276,20 @@ def tool_executor_node(state: AgentState) -> dict:
         print(f"--- 🔬 分析结果: {analysis_json_str} ---")
         analysis_json = json.loads(analysis_json_str)
         
+    except ValueError as e: # 特别捕获 _get_fragment 的失败
+        if "RDKit" in str(e):
+            # 这是一个致命的、不可重试的 SMILES 错误
+            error_message = f"致命错误：RDKit 无法为 SMILES '{state['smiles']}' 生成构象: {e}"
+            print(f"--- 🛑 {error_message} ---")
+            analysis_json = {"status": "fatal_error", "message": error_message}
+            # 不要抛出异常，而是返回这个特殊的 analysis_json
+            return {
+                "messages": [ToolMessage(content=error_message, tool_call_id="tool_executor")],
+                "analysis_json": json.dumps(analysis_json)
+            }
+        else:
+            raise e # 重新抛出，让外层捕获
+
     except Exception as e:
         error_message = str(e)
         print(f"--- 🛑 工具执行失败: {error_message} ---")
@@ -284,7 +297,7 @@ def tool_executor_node(state: AgentState) -> dict:
         analysis_json = {"status": "error", "message": f"工具执行失败: {error_message}"}
         
     return {
-        "messages": [ToolMessage(content="\n".join(tool_logs), tool_call_id="executor_run")],
+        "messages": [ToolMessage(content="\n".join(tool_logs), tool_call_id="tool_executor")],
         "analysis_json": json.dumps(analysis_json)
     }
 
@@ -386,6 +399,12 @@ def route_after_analysis(state: AgentState) -> str:
     try:
         analysis_data = json.loads(state.get("analysis_json", "{}"))
         status = analysis_data.get("status")
+
+        if status == "fatal_error":
+            print(f"--- 决策: 致命错误。流程结束。 ---")
+            history_entry = f"致命错误: {analysis_data.get('message', '未知致命错误。')}"
+            return "end"
+
         is_bound = analysis_data.get("is_covalently_bound", False) 
         plan_str = json.dumps(state.get("plan", "{}"))
 

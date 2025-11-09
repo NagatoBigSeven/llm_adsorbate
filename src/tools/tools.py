@@ -142,7 +142,7 @@ def _get_fragment(SMILES: str, orientation: str, to_initialize: int = 1) -> Unio
              if AllChem.EmbedMolecule(mol_with_hs, AllChem.ETKDGv2()) == -1:
                  # 再次尝试
                  if AllChem.EmbedMolecule(mol_with_hs, AllChem.ETKDGv2()) == -1:
-                    raise ValueError(f"RDKit (EmbedMolecule fallback) 仍未能为 {SMILES} 生成构象。")
+                    raise ValueError(f"RDKit 未能为 {SMILES} 生成构象。")
              conf_ids = [0]
         
         # 优化生成的构象
@@ -342,7 +342,6 @@ def populate_surface_with_fragment(
         raise ValueError(
             f"Autoadsorbate 未能在表面上找到任何吸附位点 (0 sites found)。"
             f"这可能是由于 `touch_sphere_size` ({touch_sphere_size}) 不合适（太大或太小）。"
-            f"请尝试 2.8 到 3.2 之间的值。"
         )
 
     # --- 2. 验证规划与位点的兼容性 (Connectivity 过滤) ---
