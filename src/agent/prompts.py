@@ -61,6 +61,8 @@ PLANNER_PROMPT = PromptTemplate(
 
 ### ⚠️ 关键限制（必须严格遵守）:
 - `orientation` 必须是 'end-on' 或 'side-on'。
+- `orientation`: 'end-on' 可以与 `site_type`: 'ontop', 'bridge', 或 'hollow' 结合使用。
+- `orientation`: 'side-on' **只能**与 `site_type`: 'bridge' 结合使用。
 - `adsorbate_binding_indices` 的长度必须是 1 (end-on) 或 2 (side-on)。
 - 严禁提出 3 点及以上的吸附方案。
 - 若用户请求多点吸附，则在 `reasoning` 字段中解释限制并提出合理替代。(例: 用户请求 "让苯平躺"，你**不能**制定一个 6 点吸附的方案，你可能会提出苯的 'side-on' C-C 键吸附）。
