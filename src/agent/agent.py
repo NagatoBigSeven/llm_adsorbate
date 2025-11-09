@@ -193,7 +193,7 @@ def plan_validator_node(state: AgentState) -> dict:
         error = f"False, Rule 1: Python check failed. site_type is 'bridge' but surface_binding_atoms has {len(surf_atoms)} members (should be 2)."
         print(f"--- 验证失败: {error} ---")
         return {"validation_error": error}
-    if "hollow" in site_type and len(surf_atoms) < 3: 
+    if site_type == "hollow" and len(surf_atoms) < 3: 
         error = f"False, Rule 1: Python check failed. site_type is 'hollow' but surface_binding_atoms has {len(surf_atoms)} members (should be >= 3)."
         print(f"--- 验证失败: {error} ---")
         return {"validation_error": error}
@@ -201,10 +201,15 @@ def plan_validator_node(state: AgentState) -> dict:
         error = f"False, Rule 2: Python check failed. orientation is 'end-on' but adsorbate_binding_indices has {len(ads_indices)} members (should be 1)."
         print(f"--- 验证失败: {error} ---")
         return {"validation_error": error}
-    if orientation == "side-on" and len(ads_indices) != 2:
-        error = f"False, Rule 2: Python check failed. orientation is 'side-on' but adsorbate_binding_indices has {len(ads_indices)} members (should be 2)."
-        print(f"--- 验证失败: {error} ---")
-        return {"validation_error": error}
+    if orientation == "side-on":
+        if len(ads_indices) != 2:
+            error = f"False, Rule 2: Python check failed. orientation is 'side-on' but adsorbate_binding_indices has {len(ads_indices)} members (should be 2)."
+            print(f"--- 验证失败: {error} ---")
+            return {"validation_error": error}
+        elif site_type != "bridge":
+            error = f"False, Rule 3: Python check failed. orientation 'side-on' is physically incompatible with site_type '{site_type}'. 'side-on' must use 'bridge'."
+            print(f"--- 验证失败: {error} ---")
+            return {"validation_error": error}
     print("--- 验证成功 ---")
     return {"validation_error": None}
 
