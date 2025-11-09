@@ -59,8 +59,12 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
         target_atom_obj = new_mol.GetAtomWithIdx(idx_map[target_idx])
         target_atom_obj.SetFormalCharge(target_atom_obj.GetFormalCharge() + 1)
         
-        out_smiles = Chem.MolToSmiles(new_mol.GetMol())
-        print(f"--- 🔬 SMILES 翻译器输出 (Cl-first, Mapped): {out_smiles} ---")
+        # 6. 为我们关心的*成键原子*添加唯一的跟踪器
+        target_atom_obj.SetAtomMapNum(114514)
+
+        out_smiles = Chem.MolToSmiles(new_mol.GetMol(), canonical=False)
+        # RDKit 现在会生成类似 "[Cl:1][C:114514]#O" 的SMILES
+        print(f"--- 🔬 SMILES 翻译器输出: {out_smiles} ---")
         return out_smiles
 
     # --- side-on (双点连接) 逻辑 ---
@@ -74,24 +78,29 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
         if idx2 >= mol.GetNumAtoms():
              raise ValueError(f"索引 {idx2} 超出范围 (分子原子数: {mol.GetNumAtoms()})。")
 
-        # 使用点运算符创建断开连接的 SMILES
-        # 我们需要先在原始分子上设置映射号
-        
+        # 我们需要一个可编辑的 mol 副本
+        rw_mol = Chem.RWMol(mol)
         atom1 = mol.GetAtomWithIdx(idx1)
         atom2 = mol.GetAtomWithIdx(idx2)
         
         # 检查是否已有映射，防止冲突
-        if atom1.GetAtomMapNum() != 0 or atom2.GetAtomMapNum() != 0:
-            print(f"--- 🔬 警告: 目标原子 {idx1} 或 {idx2} 已有原子映射号。将覆盖它们。 ---")
+        if atom1.GetAtomMapNum() != 0:
+            print(f"--- 🔬 警告: 目标原子 {idx1} 已有原子映射号。将覆盖它。 ---")
+        if atom2.GetAtomMapNum() != 0:
+            print(f"--- 🔬 警告: 目标原子 {idx2} 已有原子映射号。将覆盖它。 ---")
 
-        # RDKit 在 MolToSmiles 时会将 :1 和 :2 放在错误的位置 (例如 [C-:1]#[O+:2])
-        # _get_fragment 逻辑需要代理原子 S:1 和 S:2
-        # 因此，SMILES 必须是： [C-]#[O+] . [S:1] . [S:2]
+        # 使用 114514 和 1919810 作为绑定原子的临时映射号
+        atom1.SetAtomMapNum(114514)
+        atom2.SetAtomMapNum(1919810)
+
+        # 从修改后的 RWMol 创建 original_smiles_mapped
+        original_smiles_mapped = Chem.MolToSmiles(rw_mol.GetMol(), canonical=False)
         
-        # 我们不能只映射 C 和 O，因为 _get_fragment 需要 S:1 和 S:2
-        
-        out_smiles = f"{original_smiles}.[S:1].[S:2]"
-        print(f"--- 🔬 SMILES 翻译器输出 (S1S-first, Mapped, Disconnected): {out_smiles} ---")
+        # 原始逻辑，但现在 original_smiles_mapped 包含了 :114514 和 :1919810
+        out_smiles = f"{original_smiles_mapped}.[S:1].[S:2]"
+        # 这将生成类似 "[C-:114514]#[O+:1919810].[S:1].[S:2]" 的SMILES
+
+        print(f"--- 🔬 SMILES 翻译器输出: {out_smiles} ---")
         return out_smiles
 
     else:
@@ -107,20 +116,19 @@ def read_atoms_object(slab_path: str) -> ase.Atoms:
         raise
 
 def _get_fragment(SMILES: str, orientation: str, to_initialize: int = 1) -> Union[Fragment, ase.Atoms]:
-    # 确定我们期望的 TRICK_SMILES，以便稍后设置 .info["smiles"]
+    # 确定 TRICK_SMILES，以便稍后设置 .info["smiles"]
     TRICK_SMILES = "Cl" if orientation == "end-on" else "S1S"
 
     try:
         mol = Chem.MolFromSmiles(SMILES)
         if not mol:
             raise ValueError(f"RDKit 无法解析映射的 SMILES: {SMILES}")
-
-        mol_with_hs = Chem.AddHs(mol)
-        if not mol_with_hs:
-             # AddHs 失败 (例如，对于 [C-]#[O+].[S:1].[S:2] 中的 [S] 片段，如果它们有未满足的价态)
-             # 让我们尝试在没有 H 的情况下继续，因为代理S和CO都不需要H
-             print(f"--- 🛠️ _get_fragment: 警告: Chem.AddHs(mol) 返回 None。正在尝试在没有显式H的情况下继续... ---")
-             mol_with_hs = mol 
+        
+        try:
+            mol_with_hs = Chem.AddHs(mol)
+        except Exception:
+            print(f"--- 🛠️ _get_fragment: 警告: Chem.AddHs 失败，正在尝试在没有显式H的情况下继续... ---")
+            mol_with_hs = mol
         
         # 使用 RDKit 生成构象 (与 autoadsorbate 内部逻辑类似)
         params = AllChem.ETKDGv3()
@@ -151,9 +159,7 @@ def _get_fragment(SMILES: str, orientation: str, to_initialize: int = 1) -> Unio
             conf = mol_with_hs.GetConformer(conf_id)
             positions = conf.GetPositions()
             
-            proxy_indices = []
-            
-            # 1. 使用 GetAtomMapNum() 查找代理原子的 *RDKit 索引*
+            # 1. 查找所有映射的原子
             map_num_to_idx = {}
             for atom in all_rdkit_atoms:
                 map_num = atom.GetAtomMapNum()
@@ -161,23 +167,73 @@ def _get_fragment(SMILES: str, orientation: str, to_initialize: int = 1) -> Unio
                 if map_num > 0:
                     map_num_to_idx[map_num] = idx
             
-            # 2. 根据朝向（和 TRICK_SMILES）构建代理索引列表
+            # map_num_to_idx 现在包含 {1: rdkit_Cl_idx, 114514: rdkit_C_idx} (end-on)
+            # 或 {1: S1, 2: S2, 114514: C, 1919810: O} (side-on)
+            
+            # 2. 根据朝向构建索引列表
+            proxy_indices = []
+            binding_indices = []
+
             if TRICK_SMILES == "Cl":
-                if 1 not in map_num_to_idx:
-                    raise ValueError(f"SMILES {SMILES} 缺少映射号 [Cl:1] (或 [*:1]) 用于 end-on 键合。")
+                if 1 not in map_num_to_idx or 114514 not in map_num_to_idx:
+                    raise ValueError(f"SMILES {SMILES} 缺少映射号 1 (Cl) 或 114514 (成键原子)。")
+                
                 proxy_indices = [map_num_to_idx[1]]
+                binding_indices = [map_num_to_idx[114514]]
+
+                # 清理临时映射号
+                all_rdkit_atoms[map_num_to_idx[114514]].SetAtomMapNum(0)
                 
             elif TRICK_SMILES == "S1S":
-                if 1 not in map_num_to_idx or 2 not in map_num_to_idx:
-                     raise ValueError(f"SMILES {SMILES} 缺少映射号 [S:1] 和/或 [S:2] (或 [*:1], [*:2]) 用于 side-on 键合。")
+                if 1 not in map_num_to_idx or 2 not in map_num_to_idx or 114514 not in map_num_to_idx or 1919810 not in map_num_to_idx:
+                     raise ValueError(f"SMILES {SMILES} 缺少映射号 1 (S1), 2 (S2), 114514 (成键原子1) 或 1919810 (成键原子2)。")
+                
                 proxy_indices = [map_num_to_idx[1], map_num_to_idx[2]]
+                # 强制成键原子 *并保持代理规划的顺序*
+                binding_indices = [map_num_to_idx[114514], map_num_to_idx[1919810]]
 
-            # 3. 构建新的原子顺序：[代理原子(们), ...剩余原子]
-            #    (剩余原子是那些*没有*原子映射号的原子)
-            proxy_set = set(proxy_indices)
-            other_indices = [atom.GetIdx() for atom in all_rdkit_atoms if atom.GetIdx() not in proxy_set and atom.GetAtomMapNum() == 0]
+                # 手动对齐 S-S 向量，使其垂直于成键原子之间的键
+                s1_idx, s2_idx = proxy_indices[0], proxy_indices[1]
+                t1_idx, t2_idx = binding_indices[0], binding_indices[1]
 
-            new_order = proxy_indices + other_indices
+                # 1. 获取目标原子的位置
+                p1 = positions[t1_idx]
+                p2 = positions[t2_idx]
+                    
+                # 2. 计算它们的中点和键向量
+                midpoint = (p1 + p2) / 2.0
+                v_bond = p1 - p2
+                    
+                # 3. 计算一个垂直于键向量的向量 (即我们的 S-S 向量)
+                v_temp = np.array([1.0, 0.0, 0.0]) # 任意的非平行向量
+                v_perp = np.cross(v_bond, v_temp)
+
+                # 处理 v_bond 与 v_temp 共线的情况
+                if np.linalg.norm(v_perp) < 1e-3:
+                    v_temp = np.array([0.0, 1.0, 0.0])
+                    v_perp = np.cross(v_bond, v_temp)
+                    
+                v_perp_norm = v_perp / np.linalg.norm(v_perp)
+                    
+                # 4. 手动移动 RDKit 坐标数组中的 S 原子
+                # (距离 0.5 是任意的，autoadsorbate 只关心方向)
+                positions[s1_idx] = midpoint + v_perp_norm * 0.5
+                positions[s2_idx] = midpoint - v_perp_norm * 0.5
+                    
+                print(f"--- 🛠️ _get_fragment: 已手动对齐 S-S 向量，使其垂直于 {t1_idx}-{t2_idx} 键。 ---")
+                    
+                # 5. 清理临时映射号
+                all_rdkit_atoms[t1_idx].SetAtomMapNum(0)
+                all_rdkit_atoms[t2_idx].SetAtomMapNum(0)
+
+            # 3. 构建新的、*有保证*的原子顺序
+
+            # 收集所有*既不是*代理原子*也不是*成键原子的原子
+            special_indices_set = set(proxy_indices + binding_indices)
+            other_indices = [atom.GetIdx() for atom in all_rdkit_atoms if atom.GetIdx() not in special_indices_set and atom.GetAtomMapNum() == 0]
+
+            # 强制执行 autoadsorbate 期望的顺序
+            new_order = proxy_indices + binding_indices + other_indices
             
             # 4. 根据新顺序提取符号和位置
             new_symbols = [all_rdkit_atoms[i].GetSymbol() for i in new_order]
@@ -193,8 +249,8 @@ def _get_fragment(SMILES: str, orientation: str, to_initialize: int = 1) -> Unio
             raise ValueError(f"RDKit 构象生成成功，但原子映射追踪失败 (SMILES: {SMILES})")
 
         # 1. 创建一个 *虚拟的* Fragment 对象，使用一个已知有效的SMILES (例如 "C") 来安全地完成 __init__。
-        print(f"--- 🛠️ _get_fragment: 正在创建虚拟 Fragment (smile='C')... ---")
-        fragment = Fragment(smile="C", to_initialize=1) 
+        print(f"--- 🛠️ _get_fragment: 正在安全创建空 Fragment 对象 ... ---")
+        fragment = Fragment.__new__(Fragment)
         
         # 2. 手动 *覆盖* 库生成的虚拟构象
         print(f"--- 🛠️ _get_fragment: 正在用 {len(reordered_conformers)} 个已重排的构象覆盖 .conformers ... ---")
@@ -204,6 +260,7 @@ def _get_fragment(SMILES: str, orientation: str, to_initialize: int = 1) -> Unio
         # 3. 手动 *覆盖* smile 属性，以便 autoadsorbate.Surface 知道要剥离哪个代理（"Cl" 或 "S1S"）
         print(f"--- 🛠️ _get_fragment: 正在覆盖 .smile 为 '{TRICK_SMILES}' ... ---")
         fragment.smile = TRICK_SMILES
+        fragment.to_initialize = to_initialize
 
         print(f"--- 🛠️ _get_fragment: 成功从 *SMILES '{SMILES}' (to_initialize={to_initialize}) 创建了片段对象。 ---")
         return fragment
