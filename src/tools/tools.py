@@ -589,6 +589,47 @@ def analyze_relaxation_results(
             best_index = np.argmin(energies)
             relaxed_atoms = traj[best_index]
             print(f"--- 分析: 找到最稳定的构型 (Index {best_index})，能量: {min_energy:.4f} eV ---")
+            
+            # 1. 从 .info 字典中获取规划的位点信息
+            planned_info = relaxed_atoms.info.get("adsorbate_info", {}).get("site", {})
+            planned_connectivity = planned_info.get("connectivity")
+            planned_site_type = "unknown"
+            if planned_connectivity == 1: planned_site_type = "ontop"
+            elif planned_connectivity == 2: planned_site_type = "bridge"
+            elif planned_connectivity and planned_connectivity >= 3: planned_site_type = "hollow"
+            
+            # 2. 识别表面和吸附物索引
+            slab_indices_check = list(range(len(slab_atoms)))
+            adsorbate_indices_check = list(range(len(slab_atoms), len(relaxed_atoms)))
+            cov_cutoffs_check = natural_cutoffs(relaxed_atoms, mult=1)
+            
+            actual_bonded_slab_indices = set()
+            anchor_atom_indices = []
+            
+            if orientation == "end-on":
+                anchor_atom_indices = [adsorbate_indices_check[0]]
+            elif orientation == "side-on":
+                if len(adsorbate_indices_check) >= 2:
+                    anchor_atom_indices = [adsorbate_indices_check[0], adsorbate_indices_check[1]]
+            
+            # 3. 计算实际成键的表面原子数量
+            for anchor_idx in anchor_atom_indices:
+                anchor_cutoff = cov_cutoffs_check[anchor_idx]
+                for slab_idx in slab_indices_check:
+                    slab_cutoff = cov_cutoffs_check[slab_idx]
+                    bonding_cutoff_check = (anchor_cutoff + slab_cutoff) * 1.1
+                    dist = relaxed_atoms.get_distance(anchor_idx, slab_idx, mic=True) # 确保使用 MIC
+                    if dist <= bonding_cutoff_check:
+                        actual_bonded_slab_indices.add(slab_idx)
+            
+            actual_connectivity = len(actual_bonded_slab_indices)
+            actual_site_type = "unknown"
+            if actual_connectivity == 1: actual_site_type = "ontop"
+            elif actual_connectivity == 2: actual_site_type = "bridge"
+            elif actual_connectivity >= 3: actual_site_type = "hollow"
+            else: actual_site_type = "desorbed"
+            
+            print(f"--- 分析: 位点滑移检查：规划 {planned_site_type} (conn={planned_connectivity}), 实际 {actual_site_type} (conn={actual_connectivity}) ---")
 
         # 2. 识别吸附物原子和表面原子
         slab_indices = list(range(len(slab_atoms)))
@@ -644,7 +685,13 @@ def analyze_relaxation_results(
                 "nearest_slab_atom_index": int(nearest_slab_atom_global_index),
                 "final_bond_distance_A": round(min_distance, 3),
                 "estimated_covalent_cutoff_A": round(bonding_cutoff, 3),
-                "is_covalently_bound": bool(is_bound)
+                "is_covalently_bound": bool(is_bound),
+                "site_analysis": {
+                    "planned_site_type": planned_site_type,
+                    "planned_connectivity": planned_connectivity,
+                    "actual_site_type": actual_site_type,
+                    "actual_connectivity": actual_connectivity
+                }
             }
         
         elif orientation == "side-on":
@@ -712,6 +759,12 @@ def analyze_relaxation_results(
                     "global_index": int(second_atom_global_index),
                     "distance_A": round(min_distance_2, 3),
                     "is_bound": bool(is_bound_2)
+                },
+                "site_analysis": {
+                    "planned_site_type": planned_site_type,
+                    "planned_connectivity": planned_connectivity,
+                    "actual_site_type": actual_site_type,
+                    "actual_connectivity": actual_connectivity
                 }
             }
 
