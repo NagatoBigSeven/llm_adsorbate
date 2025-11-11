@@ -257,10 +257,15 @@ def tool_executor_node(state: AgentState) -> dict:
         print("--- ⏳ 开始结构弛豫... ---")
         slab_indices = list(range(len(slab_atoms)))
         relax_n = plan_solution.get("relax_top_n", 1)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"--- 🛠️ MACE 将使用设备: {device} ---")
+
         final_traj_file = relax_atoms(
             atoms_list=list(initial_conformers),
             slab_indices=slab_indices,
-            relax_top_n=relax_n
+            relax_top_n=relax_n,
+            mace_model="small",
+            mace_device=device
         )
         tool_logs.append(f"成功: 结构弛豫完成 (弛豫了 Top {relax_n})。轨迹保存在 '{final_traj_file}'。")
         
