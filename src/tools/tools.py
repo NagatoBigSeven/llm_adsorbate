@@ -55,10 +55,36 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
         # 4. 添加 Cl-Atom 键
         new_mol.AddBond(marker_idx, idx_map[target_idx], Chem.rdchem.BondType.SINGLE)
         
-        # 5. 调整电荷
+        # 5. 调整电荷 (基于价电子数，区分共价键和配位键)
         target_atom_obj = new_mol.GetAtomWithIdx(idx_map[target_idx])
-        target_atom_obj.SetFormalCharge(target_atom_obj.GetFormalCharge() + 1)
+
+        # 从 RDKit 获取化学原理
+        atomic_num = target_atom_obj.GetAtomicNum()
+        charge = target_atom_obj.GetFormalCharge()
+        pt = Chem.GetPeriodicTable()
         
+        # 使用 *正确* 的 RDKit API: GetNOuterElecs (获取外层/价电子数)
+        n_outer_elecs = pt.GetNOuterElecs(atomic_num)
+
+        # 特例：一氧化碳 ([C-]#[O+])，C[0] (4价电子) 但 charge = -1
+        is_carbon_monoxide_case = (n_outer_elecs == 4 and charge == -1)
+
+        # “价电子数>4”逻辑：(N, O, S, Se...) 
+        # 并且它们是中性或负电性的（即它们有孤对电子可以给出）
+        has_lone_pair_to_donate = (n_outer_elecs > 4 and charge <= 0)
+
+        if has_lone_pair_to_donate or is_carbon_monoxide_case:
+            # --- 模拟配位键 (Dative Bond) ---
+            # (N, O, S, Se... 或 N- 或 C-)
+            # 增加电荷以释放孤对电子用于成键
+            print(f"--- 🔬 (价电子: {n_outer_elecs}) 正在为配位原子 {target_atom_obj.GetSymbol()} (Charge={charge}) 应用 +1 电荷调整... ---")
+            target_atom_obj.SetFormalCharge(charge + 1)
+        else:
+            # --- 模拟共价键 (Covalent Bond) ---
+            # (C, B, Si... 或 [O+] 等已氧化的原子)
+            # 不调整电荷，让 Chem.AddHs 自动少加一个H
+            print(f"--- 🔬 (价电子: {n_outer_elecs}) 正在为共价原子 {target_atom_obj.GetSymbol()} (Charge={charge}) 保留原始电荷... ---")
+
         # 6. 为我们关心的*成键原子*添加唯一的跟踪器
         target_atom_obj.SetAtomMapNum(114514)
 
