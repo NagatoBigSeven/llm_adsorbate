@@ -206,8 +206,8 @@ def plan_validator_node(state: AgentState) -> dict:
             error = f"False, Rule 2: Python check failed. orientation is 'side-on' but adsorbate_binding_indices has {len(ads_indices)} members (should be 2)."
             print(f"--- 验证失败: {error} ---")
             return {"validation_error": error}
-        elif site_type != "bridge":
-            error = f"False, Rule 3: Python check failed. orientation 'side-on' is physically incompatible with site_type '{site_type}'. 'side-on' must use 'bridge'."
+        elif site_type not in ["bridge", "hollow"]:
+            error = f"False, Rule 3: Python check failed. orientation 'side-on' is physically incompatible with site_type '{site_type}'. 'side-on' must use 'bridge' or 'hollow'."
             print(f"--- 验证失败: {error} ---")
             return {"validation_error": error}
     print("--- 验证成功 ---")
