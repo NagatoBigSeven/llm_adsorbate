@@ -234,14 +234,88 @@ def tool_executor_node(state: AgentState) -> dict:
     try:
         slab_atoms = read_atoms_object(slab_path)
         tool_logs.append(f"成功: 已从 {slab_path} 读取 slab 原子。")
+    
+        # --- 计算参考态能量 (E_surface 和 E_adsorbate) ---
+        # 1. 初始化一个统一的计算器和 *一致的* 弛豫参数
+        try:
+            import torch
+            from ase import units
+            from ase.constraints import FixAtoms
+            from ase.md.langevin import Langevin
+            from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
+            from ase.optimize import BFGS
+            from mace.calculators import mace_mp
+            
+            # 统一定义弛豫参数
+            opt_fmax = 0.05
+            opt_steps = 500
+            md_steps = 20
+            md_temp = 150.0
+            mace_model = "small"
+            mace_device = "cuda" if torch.cuda.is_available() else "cpu"
+            
+            temp_calc = mace_mp(model=mace_model, device=mace_device, default_dtype='float32', dispersion=True)
 
+        except Exception as e_calc:
+            raise ValueError(f"Failed to initialize MACE calculator: {e_calc}")
+
+        # 2. 计算 E_surface
+        try:
+            e_surf_atoms = slab_atoms.copy()
+            e_surf_atoms.calc = temp_calc
+
+            # *** 应用与 relax_atoms *完全一致* 的约束 ***
+            # tools.py::relax_atoms 固定了 *所有* 表面原子。
+            constraint = FixAtoms(indices=list(range(len(e_surf_atoms))))
+            e_surf_atoms.set_constraint(constraint)
+
+            print(f"--- 🛠️ 正在计算裸表面的单点能 (所有原子已固定)... ---")
+
+            E_surface = e_surf_atoms.get_potential_energy() # 这现在是一个单点能
+            tool_logs.append(f"Success: E_surface = {E_surface:.4f} eV。")
+            
+        except Exception as e_surf_err:
+            raise ValueError(f"Failed to calculate E_surface: {e_surf_err}")
+    
         fragment_object = create_fragment_from_plan(
             original_smiles=state["smiles"],
             binding_atom_indices=plan_solution.get("adsorbate_binding_indices"),
             orientation=plan_solution.get("orientation"),
             to_initialize=plan_solution.get("conformers_per_site_cap", 5)
         )
-        tool_logs.append(f"成功: 已从规划中生成片段对象 (SMILES: {state['smiles']})。")
+        tool_logs.append(f"Success: Created fragment object from plan (SMILES: {state['smiles']}).")
+
+        try:
+            adsorbate_only_atoms = fragment_object.conformers[0].copy()
+            
+            # 移除标记
+            if adsorbate_only_atoms.info["smiles"] == "Cl":
+                del adsorbate_only_atoms[0]
+            elif adsorbate_only_atoms.info["smiles"] == "S1S":
+                del adsorbate_only_atoms[:2]
+                
+            adsorbate_only_atoms.calc = temp_calc
+            adsorbate_only_atoms.set_cell([20, 20, 20]) 
+            adsorbate_only_atoms.center()
+            
+            print(f"--- 🛠️ 正在弛豫孤立的 {state['smiles']} 分子... ---")
+
+            # *** 应用 *一致* 的弛豫协议 ***
+            
+            # 协议 1: MD 预热 (与 relax_atoms 一致)
+            if md_steps > 0:
+                MaxwellBoltzmannDistribution(adsorbate_only_atoms, temperature_K=md_temp)
+                dyn_md_ads = Langevin(adsorbate_only_atoms, 1 * units.fs, temperature_K=md_temp, friction=0.01)
+                dyn_md_ads.run(md_steps)
+                
+            # 协议 2: BFGS 优化 (与 relax_atoms 一致)
+            BFGS(adsorbate_only_atoms).run(fmax=opt_fmax, steps=opt_steps)
+            
+            E_adsorbate = adsorbate_only_atoms.get_potential_energy()
+            tool_logs.append(f"成功: E_adsorbate = {E_adsorbate:.4f} eV。")
+            
+        except Exception as e_ads_err:
+            raise ValueError(f"计算 E_adsorbate 失败: {e_ads_err}")
 
         generated_traj_file = populate_surface_with_fragment(
             slab_atoms=slab_atoms,
@@ -264,8 +338,12 @@ def tool_executor_node(state: AgentState) -> dict:
             atoms_list=list(initial_conformers),
             slab_indices=slab_indices,
             relax_top_n=relax_n,
-            mace_model="small",
-            mace_device=device
+            fmax=opt_fmax,
+            steps=opt_steps,
+            md_steps=md_steps,
+            md_temp=md_temp,
+            mace_model=mace_model,
+            mace_device=mace_device
         )
         tool_logs.append(f"成功: 结构弛豫完成 (弛豫了 Top {relax_n})。轨迹保存在 '{final_traj_file}'。")
         
@@ -275,7 +353,9 @@ def tool_executor_node(state: AgentState) -> dict:
             slab_atoms=slab_atoms,
             original_smiles=state["smiles"],
             binding_atom_indices=plan_solution.get("adsorbate_binding_indices"),
-            orientation=plan_solution.get("orientation")
+            orientation=plan_solution.get("orientation"),
+            e_surface_ref=E_surface,
+            e_adsorbate_ref=E_adsorbate
         )
         tool_logs.append(f"成功: 分析工具已执行。")
         print(f"--- 🔬 分析结果: {analysis_json_str} ---")

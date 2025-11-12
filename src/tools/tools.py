@@ -585,7 +585,9 @@ def analyze_relaxation_results(
     slab_atoms: ase.Atoms,
     original_smiles: str,
     binding_atom_indices: list[int],
-    orientation: str
+    orientation: str,
+    e_surface_ref: float = 0.0,
+    e_adsorbate_ref: float = 0.0
 ) -> str:
     try:
         print(f"--- 🛠️ 正在分析弛豫结果: {relaxed_trajectory_file} ---")
@@ -602,60 +604,54 @@ def analyze_relaxation_results(
             except Exception:
                 pass
         
-        if not energies:
-            if len(traj) > 0:
-                 relaxed_atoms = traj[-1]
-                 min_energy = -999.0
-                 best_index = len(traj) - 1
-                 print(f"--- 分析: 警告：无法从 .xyz 读取能量。回退到分析最后一个结构 (Index {best_index}) ---")
-            else:
-                 return json.dumps({"status": "error", "message": "弛豫轨迹为空。"})
-        else:
-            min_energy = min(energies)
-            best_index = np.argmin(energies)
-            relaxed_atoms = traj[best_index]
-            print(f"--- 分析: 找到最稳定的构型 (Index {best_index})，能量: {min_energy:.4f} eV ---")
-            
-            # 1. 从 .info 字典中获取规划的位点信息
-            planned_info = relaxed_atoms.info.get("adsorbate_info", {}).get("site", {})
-            planned_connectivity = planned_info.get("connectivity")
-            planned_site_type = "unknown"
-            if planned_connectivity == 1: planned_site_type = "ontop"
-            elif planned_connectivity == 2: planned_site_type = "bridge"
-            elif planned_connectivity and planned_connectivity >= 3: planned_site_type = "hollow"
-            
-            # 2. 识别表面和吸附物索引
-            slab_indices_check = list(range(len(slab_atoms)))
-            adsorbate_indices_check = list(range(len(slab_atoms), len(relaxed_atoms)))
-            cov_cutoffs_check = natural_cutoffs(relaxed_atoms, mult=1)
-            
-            actual_bonded_slab_indices = set()
-            anchor_atom_indices = []
-            
-            if orientation == "end-on":
-                anchor_atom_indices = [adsorbate_indices_check[0]]
-            elif orientation == "side-on":
-                if len(adsorbate_indices_check) >= 2:
-                    anchor_atom_indices = [adsorbate_indices_check[0], adsorbate_indices_check[1]]
-            
-            # 3. 计算实际成键的表面原子数量
-            for anchor_idx in anchor_atom_indices:
-                anchor_cutoff = cov_cutoffs_check[anchor_idx]
-                for slab_idx in slab_indices_check:
-                    slab_cutoff = cov_cutoffs_check[slab_idx]
-                    bonding_cutoff_check = (anchor_cutoff + slab_cutoff) * 1.1
-                    dist = relaxed_atoms.get_distance(anchor_idx, slab_idx, mic=True) # 确保使用 MIC
-                    if dist <= bonding_cutoff_check:
-                        actual_bonded_slab_indices.add(slab_idx)
-            
-            actual_connectivity = len(actual_bonded_slab_indices)
-            actual_site_type = "unknown"
-            if actual_connectivity == 1: actual_site_type = "ontop"
-            elif actual_connectivity == 2: actual_site_type = "bridge"
-            elif actual_connectivity >= 3: actual_site_type = "hollow"
-            else: actual_site_type = "desorbed"
-            
-            print(f"--- 分析: 位点滑移检查：规划 {planned_site_type} (conn={planned_connectivity}), 实际 {actual_site_type} (conn={actual_connectivity}) ---")
+        min_energy_total = min(energies)
+        best_index = np.argmin(energies)
+        relaxed_atoms = traj[best_index]
+
+        E_ads = min_energy_total - e_surface_ref - e_adsorbate_ref
+        print(f"--- Analysis: E_total = {min_energy_total:.4f} eV")
+        print(f"--- Analysis: E_ads = {E_ads:.4f} eV (E_surf={e_surface_ref:.4f}, E_ads_mol={e_adsorbate_ref:.4f}) ---")
+        
+        # 1.1. 从 .info 字典中获取规划的位点信息
+        planned_info = relaxed_atoms.info.get("adsorbate_info", {}).get("site", {})
+        planned_connectivity = planned_info.get("connectivity")
+        planned_site_type = "unknown"
+        if planned_connectivity == 1: planned_site_type = "ontop"
+        elif planned_connectivity == 2: planned_site_type = "bridge"
+        elif planned_connectivity and planned_connectivity >= 3: planned_site_type = "hollow"
+        
+        # 1.2. 识别表面和吸附物索引
+        slab_indices_check = list(range(len(slab_atoms)))
+        adsorbate_indices_check = list(range(len(slab_atoms), len(relaxed_atoms)))
+        cov_cutoffs_check = natural_cutoffs(relaxed_atoms, mult=1)
+        
+        actual_bonded_slab_indices = set()
+        anchor_atom_indices = []
+        
+        if orientation == "end-on":
+            anchor_atom_indices = [adsorbate_indices_check[0]]
+        elif orientation == "side-on":
+            if len(adsorbate_indices_check) >= 2:
+                anchor_atom_indices = [adsorbate_indices_check[0], adsorbate_indices_check[1]]
+        
+        # 1.3. 计算实际成键的表面原子数量
+        for anchor_idx in anchor_atom_indices:
+            anchor_cutoff = cov_cutoffs_check[anchor_idx]
+            for slab_idx in slab_indices_check:
+                slab_cutoff = cov_cutoffs_check[slab_idx]
+                bonding_cutoff_check = (anchor_cutoff + slab_cutoff) * 1.1
+                dist = relaxed_atoms.get_distance(anchor_idx, slab_idx, mic=True) # 确保使用 MIC
+                if dist <= bonding_cutoff_check:
+                    actual_bonded_slab_indices.add(slab_idx)
+        
+        actual_connectivity = len(actual_bonded_slab_indices)
+        actual_site_type = "unknown"
+        if actual_connectivity == 1: actual_site_type = "ontop"
+        elif actual_connectivity == 2: actual_site_type = "bridge"
+        elif actual_connectivity >= 3: actual_site_type = "hollow"
+        else: actual_site_type = "desorbed"
+        
+        print(f"--- 分析: 位点滑移检查：规划 {planned_site_type} (conn={planned_connectivity}), 实际 {actual_site_type} (conn={actual_connectivity}) ---")
 
         # 2. 识别吸附物原子和表面原子
         slab_indices = list(range(len(slab_atoms)))
@@ -693,7 +689,7 @@ def analyze_relaxation_results(
             is_bound = min_distance <= bonding_cutoff
 
             analysis_message = (
-                f"最稳定的构型能量: {min_energy:.4f} eV。 "
+                f"最稳定构型吸附能: {E_ads:.4f} eV。 "
                 f"目标吸附物原子: {target_atom_symbol} (来自规划索引 {binding_atom_indices[0]}，在弛豫结构中为全局索引 {target_atom_global_index})。 "
                 f"最近的表面原子: {nearest_slab_atom_symbol} (Index {nearest_slab_atom_global_index})。 "
                 f"最终距离: {round(min_distance, 3)} Å. "
@@ -704,7 +700,7 @@ def analyze_relaxation_results(
             result = {
                 "status": "success",
                 "message": analysis_message,
-                "most_stable_energy_eV": min_energy,
+                "most_stable_energy_eV": E_ads,
                 "target_adsorbate_atom": target_atom_symbol,
                 "target_adsorbate_atom_index": int(target_atom_global_index),
                 "nearest_slab_atom": nearest_slab_atom_symbol,
@@ -761,18 +757,18 @@ def analyze_relaxation_results(
             is_bound = bool(is_bound_1 and is_bound_2) 
             
             analysis_message = (
-                f"最稳定的构型能量: {min_energy:.4f} eV。 "
+                f"最稳定构型吸附能: {E_ads:.4f} eV。 "
                 f"目标原子 1: {target_atom_symbol} (来自规划索引 {binding_atom_indices[0]}，全局索引 {target_atom_global_index})。 "
                 f"  -> 最近: {nearest_slab_atom_symbol} (Index {nearest_slab_atom_global_index}), 距离: {round(min_distance, 3)} Å (阈值: {round(bonding_cutoff, 3)}), 成键: {is_bound_1}。 "
                 f"目标原子 2: {second_atom_symbol} (来自规划索引 {binding_atom_indices[1]}，全局索引 {second_atom_global_index})。 "
                 f"  -> 最近: {nearest_slab_atom_symbol_2} (Index {nearest_slab_atom_global_index_2}), 距离: {round(min_distance_2, 3)} Å (阈值: {round(bonding_cutoff_2, 3)}), 成键: {is_bound_2}。 "
                 f"整体是否成键: {is_bound}."
             )
-            
+
             result = {
                 "status": "success",
                 "message": analysis_message,
-                "most_stable_energy_eV": min_energy,
+                "most_stable_energy_eV": E_ads,
                 "is_covalently_bound": is_bound,
                 "atom_1": {
                     "symbol": target_atom_symbol,
@@ -806,9 +802,8 @@ def analyze_relaxation_results(
         except Exception as e:
             print(f"--- 🛠️ 错误: 无法保存最佳结构到 {best_atoms_filename}: {e} ---")
 
-
         return json.dumps(result)
-
+    
     except Exception as e:
         import traceback
         print(f"--- 🛠️ 错误: 分析弛豫时发生意外异常: {e} ---")
