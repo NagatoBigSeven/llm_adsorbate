@@ -17,26 +17,27 @@ from rdkit.Chem import AllChem
 from ase import Atoms
 from typing import Union
 
-def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[int], orientation: str) -> str:
-    print(f"--- 🔬 调用 SMILES 翻译器: {original_smiles} via indices {binding_atom_indices} (朝向: {orientation}) ---")
+def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[int], site_type: str) -> str:
+    print(f"--- 🔬 调用 SMILES 翻译器: {original_smiles} via indices {binding_atom_indices} (位点: {site_type}) ---")
     
     mol = Chem.MolFromSmiles(original_smiles)
     if not mol:
         raise ValueError(f"RDKit 无法解析原始 SMILES: {original_smiles}")
     
-    # --- end-on (单点连接) 逻辑 ---
-    if orientation == "end-on":
-        if not binding_atom_indices or len(binding_atom_indices) != 1:
-            raise ValueError(f"'end-on' 朝向需要 *一个* 键合索引，但提供了 {len(binding_atom_indices)} 个。")
+    num_binding_indices = len(binding_atom_indices)
+    
+    # --- end-on @ ontop ---
+    if site_type == "ontop":
+        if num_binding_indices != 1:
+            raise ValueError(f"'ontop' 位点需要 1 个键合索引，但提供了 {num_binding_indices} 个。")
             
         target_idx = binding_atom_indices[0]
         
         if target_idx >= mol.GetNumAtoms():
              raise ValueError(f"索引 {target_idx} 超出范围 (分子原子数: {mol.GetNumAtoms()})。")
 
-        # RWMol 逻辑对于 'end-on' 是健壮的
         new_mol = Chem.RWMol()
-        
+
         # 1. 添加 Cl 标记 (索引 0)，并设置原子映射号为 1
         marker_atom = Chem.Atom("Cl")
         marker_atom.SetAtomMapNum(1) # [Cl:1]
@@ -93,44 +94,52 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
         print(f"--- 🔬 SMILES 翻译器输出: {out_smiles} ---")
         return out_smiles
 
-    # --- side-on (双点连接) 逻辑 ---
-    elif orientation == "side-on":
-        if not binding_atom_indices or len(binding_atom_indices) != 2:
-            raise ValueError(f"'side-on' 朝向需要 *两个* 键合索引，但提供了 {len(binding_atom_indices)} 个。")
-        
-        target_indices = sorted(binding_atom_indices)
-        idx1, idx2 = target_indices[0], target_indices[1]
+    # --- 逻辑 2 & 3: end-on/side-on @ bridge/hollow ---
+    elif site_type in ["bridge", "hollow"]:
+        if num_binding_indices == 1:
+            # --- end-on @ bridge/hollow ---
+            target_idx = binding_atom_indices[0]
+            if target_idx >= mol.GetNumAtoms():
+                 raise ValueError(f"索引 {target_idx} 超出范围 (分子原子数: {mol.GetNumAtoms()})。")
 
-        if idx2 >= mol.GetNumAtoms():
-             raise ValueError(f"索引 {idx2} 超出范围 (分子原子数: {mol.GetNumAtoms()})。")
+            rw_mol = Chem.RWMol(mol)
+            atom1 = rw_mol.GetAtomWithIdx(target_idx)
+            atom1.SetAtomMapNum(114514)
 
-        # 我们需要一个可编辑的 mol 副本
-        rw_mol = Chem.RWMol(mol)
-        atom1 = mol.GetAtomWithIdx(idx1)
-        atom2 = mol.GetAtomWithIdx(idx2)
-        
-        # 检查是否已有映射，防止冲突
-        if atom1.GetAtomMapNum() != 0:
-            print(f"--- 🔬 警告: 目标原子 {idx1} 已有原子映射号。将覆盖它。 ---")
-        if atom2.GetAtomMapNum() != 0:
-            print(f"--- 🔬 警告: 目标原子 {idx2} 已有原子映射号。将覆盖它。 ---")
+            original_smiles_mapped = Chem.MolToSmiles(rw_mol.GetMol(), canonical=False)
 
-        # 使用 114514 和 1919810 作为绑定原子的临时映射号
-        atom1.SetAtomMapNum(114514)
-        atom2.SetAtomMapNum(1919810)
+            # 使用“点运算符”来欺骗 RDKit 加氢
+            out_smiles = f"{original_smiles_mapped}.[S:1].[S:2]"
+            print(f"--- 🔬 SMILES 翻译器输出: {out_smiles} ---")
+            return out_smiles
 
-        # 从修改后的 RWMol 创建 original_smiles_mapped
-        original_smiles_mapped = Chem.MolToSmiles(rw_mol.GetMol(), canonical=False)
-        
-        # 原始逻辑，但现在 original_smiles_mapped 包含了 :114514 和 :1919810
-        out_smiles = f"{original_smiles_mapped}.[S:1].[S:2]"
-        # 这将生成类似 "[C-:114514]#[O+:1919810].[S:1].[S:2]" 的SMILES
+        elif num_binding_indices == 2:
+            # --- side-on @ bridge/hollow ---
+            target_indices = sorted(binding_atom_indices)
+            idx1, idx2 = target_indices[0], target_indices[1]
 
-        print(f"--- 🔬 SMILES 翻译器输出: {out_smiles} ---")
-        return out_smiles
+            if idx2 >= mol.GetNumAtoms():
+                 raise ValueError(f"索引 {idx2} 超出范围 (分子原子数: {mol.GetNumAtoms()})。")
+
+            rw_mol = Chem.RWMol(mol)
+            atom1 = rw_mol.GetAtomWithIdx(idx1)
+            atom2 = rw_mol.GetAtomWithIdx(idx2)
+
+            atom1.SetAtomMapNum(114514) # 跟踪器 1
+            atom2.SetAtomMapNum(1919810) # 跟踪器 2
+
+            original_smiles_mapped = Chem.MolToSmiles(rw_mol.GetMol(), canonical=False)
+
+            # 使用“点运算符”来欺骗 RDKit 加氢
+            out_smiles = f"{original_smiles_mapped}.[S:1].[S:2]"
+            print(f"--- 🔬 SMILES 翻译器输出: {out_smiles} ---")
+            return out_smiles
+
+        else:
+            raise ValueError(f"'{site_type}' 位点不支持 {num_binding_indices} 个键合索引。")
 
     else:
-        raise ValueError(f"未知的朝向: {orientation}。必须是 'end-on' 或 'side-on'。")
+        raise ValueError(f"未知的 site_type: {site_type}。必须是 'ontop', 'bridge' 或 'hollow'。")
 
 def read_atoms_object(slab_path: str) -> ase.Atoms:
     try:
@@ -141,9 +150,17 @@ def read_atoms_object(slab_path: str) -> ase.Atoms:
         print(f"错误: 无法读取 {slab_path}: {e}")
         raise
 
-def _get_fragment(SMILES: str, orientation: str, to_initialize: int = 1) -> Union[Fragment, ase.Atoms]:
+def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_initialize: int = 1) -> Union[Fragment, ase.Atoms]:
     # 确定 TRICK_SMILES，以便稍后设置 .info["smiles"]
-    TRICK_SMILES = "Cl" if orientation == "end-on" else "S1S"
+    TRICK_SMILES = ""
+    if site_type == "ontop":
+        TRICK_SMILES = "Cl"
+    elif site_type in ["bridge", "hollow"]:
+        TRICK_SMILES = "S1S"
+    else:
+        raise ValueError(f"未知的 site_type: {site_type}")
+
+    print(f"--- 🛠️ _get_fragment: 正在为 {site_type} 位点准备 {TRICK_SMILES} 标记...")
 
     try:
         mol = Chem.MolFromSmiles(SMILES)
@@ -193,14 +210,15 @@ def _get_fragment(SMILES: str, orientation: str, to_initialize: int = 1) -> Unio
                 if map_num > 0:
                     map_num_to_idx[map_num] = idx
             
-            # map_num_to_idx 现在包含 {1: rdkit_Cl_idx, 114514: rdkit_C_idx} (end-on)
-            # 或 {1: S1, 2: S2, 114514: C, 1919810: O} (side-on)
-            
-            # 2. 根据朝向构建索引列表
+            # 2. 根据 TRICK_SMILES 和 num_binding_indices 构建索引列表
             proxy_indices = []
             binding_indices = []
 
             if TRICK_SMILES == "Cl":
+                # --- end-on @ ontop ---
+                if num_binding_indices != 1:
+                     raise ValueError(f"代码逻辑错误: TRICK_SMILES='Cl' 但键合索引 != 1")
+
                 if 1 not in map_num_to_idx or 114514 not in map_num_to_idx:
                     raise ValueError(f"SMILES {SMILES} 缺少映射号 1 (Cl) 或 114514 (成键原子)。")
                 
@@ -211,46 +229,72 @@ def _get_fragment(SMILES: str, orientation: str, to_initialize: int = 1) -> Unio
                 all_rdkit_atoms[map_num_to_idx[114514]].SetAtomMapNum(0)
                 
             elif TRICK_SMILES == "S1S":
-                if 1 not in map_num_to_idx or 2 not in map_num_to_idx or 114514 not in map_num_to_idx or 1919810 not in map_num_to_idx:
-                     raise ValueError(f"SMILES {SMILES} 缺少映射号 1 (S1), 2 (S2), 114514 (成键原子1) 或 1919810 (成键原子2)。")
+                # --- end-on/side-on @ bridge/hollow ---
+                if 1 not in map_num_to_idx or 2 not in map_num_to_idx:
+                     raise ValueError(f"SMILES {SMILES} 缺少映射号 1 (S1), 2 (S2)。")
                 
                 proxy_indices = [map_num_to_idx[1], map_num_to_idx[2]]
-                # 强制成键原子 *并保持代理规划的顺序*
-                binding_indices = [map_num_to_idx[114514], map_num_to_idx[1919810]]
 
-                # 手动对齐 S-S 向量，使其垂直于成键原子之间的键
-                s1_idx, s2_idx = proxy_indices[0], proxy_indices[1]
-                t1_idx, t2_idx = binding_indices[0], binding_indices[1]
+                if num_binding_indices == 1:
+                    # --- end-on @ bridge/hollow ---
+                    if 114514 not in map_num_to_idx:
+                         raise ValueError(f"SMILES {SMILES} 缺少映射号 114514 (成键原子1)。")
 
-                # 1. 获取目标原子的位置
-                p1 = positions[t1_idx]
-                p2 = positions[t2_idx]
-                    
-                # 2. 计算它们的中点和键向量
-                midpoint = (p1 + p2) / 2.0
-                v_bond = p1 - p2
-                    
-                # 3. 计算一个垂直于键向量的向量 (即我们的 S-S 向量)
-                v_temp = np.array([1.0, 0.0, 0.0]) # 任意的非平行向量
-                v_perp = np.cross(v_bond, v_temp)
+                    binding_indices = [map_num_to_idx[114514]]
 
-                # 处理 v_bond 与 v_temp 共线的情况
-                if np.linalg.norm(v_perp) < 1e-3:
-                    v_temp = np.array([0.0, 1.0, 0.0])
+                    # 手动对齐 S-S 向量，使其 *垂直* 于 Z 轴（模拟 end-on）
+                    s1_idx, s2_idx = proxy_indices[0], proxy_indices[1]
+                    t1_idx = binding_indices[0]
+
+                    p1 = positions[t1_idx]
+
+                    # 将 S 标记放置在成键原子的 x-y 平面上方和下方
+                    positions[s1_idx] = p1 + np.array([0.5, 0.0, 0.0]) # 任意非平行向量
+                    positions[s2_idx] = p1 - np.array([0.5, 0.0, 0.0])
+
+                    print(f"--- 🛠️ _get_fragment: 已手动对齐 S-S 标记用于 End-on 模式。 ---")
+
+                    all_rdkit_atoms[t1_idx].SetAtomMapNum(0)
+                elif num_binding_indices == 2:
+                    # --- side-on @ bridge/hollow ---
+                    if 114514 not in map_num_to_idx or 1919810 not in map_num_to_idx:
+                         raise ValueError(f"SMILES {SMILES} 缺少映射号 114514 (成键原子1) 或 1919810 (成键原子2)。")
+
+                    binding_indices = [map_num_to_idx[114514], map_num_to_idx[1919810]]
+
+                    # 手动对齐 S-S 向量，使其垂直于成键原子之间的键
+                    s1_idx, s2_idx = proxy_indices[0], proxy_indices[1]
+                    t1_idx, t2_idx = binding_indices[0], binding_indices[1]
+
+                    # 1. 获取目标原子的位置
+                    p1 = positions[t1_idx]
+                    p2 = positions[t2_idx]
+                        
+                    # 2. 计算它们的中点和键向量
+                    midpoint = (p1 + p2) / 2.0
+                    v_bond = p1 - p2
+                        
+                    # 3. 计算一个垂直于键向量的向量 (即我们的 S-S 向量)
+                    v_temp = np.array([1.0, 0.0, 0.0]) # 任意的非平行向量
                     v_perp = np.cross(v_bond, v_temp)
-                    
-                v_perp_norm = v_perp / np.linalg.norm(v_perp)
-                    
-                # 4. 手动移动 RDKit 坐标数组中的 S 原子
-                # (距离 0.5 是任意的，autoadsorbate 只关心方向)
-                positions[s1_idx] = midpoint + v_perp_norm * 0.5
-                positions[s2_idx] = midpoint - v_perp_norm * 0.5
-                    
-                print(f"--- 🛠️ _get_fragment: 已手动对齐 S-S 向量，使其垂直于 {t1_idx}-{t2_idx} 键。 ---")
-                    
-                # 5. 清理临时映射号
-                all_rdkit_atoms[t1_idx].SetAtomMapNum(0)
-                all_rdkit_atoms[t2_idx].SetAtomMapNum(0)
+
+                    # 处理 v_bond 与 v_temp 共线的情况
+                    if np.linalg.norm(v_perp) < 1e-3:
+                        v_temp = np.array([0.0, 1.0, 0.0])
+                        v_perp = np.cross(v_bond, v_temp)
+                        
+                    v_perp_norm = v_perp / np.linalg.norm(v_perp)
+                        
+                    # 4. 手动移动 RDKit 坐标数组中的 S 原子
+                    # (距离 0.5 是任意的，autoadsorbate 只关心方向)
+                    positions[s1_idx] = midpoint + v_perp_norm * 0.5
+                    positions[s2_idx] = midpoint - v_perp_norm * 0.5
+                        
+                    print(f"--- 🛠️ _get_fragment: 已手动对齐 S-S 向量，使其垂直于 {t1_idx}-{t2_idx} 键。 ---")
+                        
+                    # 5. 清理临时映射号
+                    all_rdkit_atoms[t1_idx].SetAtomMapNum(0)
+                    all_rdkit_atoms[t2_idx].SetAtomMapNum(0)
 
             # 3. 构建新的、*有保证*的原子顺序
 
@@ -302,18 +346,28 @@ def create_fragment_from_plan(
     to_initialize: int = 1
 ) -> Fragment:
     print(f"--- 🛠️ 正在执行 create_fragment_from_plan ... ---")
+
+    # 从规划字典中提取所需信息
+    plan_solution = plan_dict.get("solution", {})
+    adsorbate_type = plan_dict.get("adsorbate_type")
+    site_type = plan_solution.get("site_type")
+    num_binding_indices = len(binding_atom_indices)
+
+    if not site_type or not adsorbate_type:
+        raise ValueError("plan_dict 缺少 'site_type' 或 'adsorbate_type'。")
     
     # 1. 内部调用 SMILES 生成器
     surrogate_smiles = generate_surrogate_smiles(
         original_smiles=original_smiles,
         binding_atom_indices=binding_atom_indices,
-        orientation=orientation
+        site_type=site_type
     )
 
     # 2. 内部调用构象生成器 (包含所有补丁和技巧)
     fragment = _get_fragment(
         SMILES=surrogate_smiles,
-        orientation=orientation,
+        site_type=site_type,
+        num_binding_indices=num_binding_indices,
         to_initialize=to_initialize
     )
     
@@ -323,9 +377,10 @@ def create_fragment_from_plan(
         fragment.info = {}
 
     # 3. 关键：将原始规划信息附加到 Fragment 对象上
-    fragment.info["plan_orientation"] = orientation
+    fragment.info["plan_site_type"] = site_type
     fragment.info["plan_original_smiles"] = original_smiles
     fragment.info["plan_binding_atom_indices"] = binding_atom_indices
+    fragment.info["plan_adsorbate_type"] = adsorbate_type
     
     print(f"--- 🛠️ create_fragment_from_plan: 成功创建并标记了 Fragment 对象。 ---")
     return fragment
@@ -337,10 +392,11 @@ def populate_surface_with_fragment(
     **kwargs
 ) -> str:
     # --- 1. 从 Fragment 对象中检索规划 ---
-    if not hasattr(fragment_object, "info") or "plan_orientation" not in fragment_object.info:
-        raise ValueError("Fragment 对象缺少 'plan_orientation' 信息。请使用 'create_fragment_from_plan' 创建它。")
+    if not hasattr(fragment_object, "info") or "plan_site_type" not in fragment_object.info:
+        raise ValueError("Fragment 对象缺少 'plan_site_type' 信息。请使用 'create_fragment_from_plan' 创建它。")
         
-    plan_orientation = fragment_object.info["plan_orientation"]
+    site_type = fragment_object.info["plan_site_type"]
+    num_binding_indices = len(fragment_object.info["plan_binding_atom_indices"])
 
     # --- 从规划中读取参数 (或使用默认值) ---
     site_type = plan_solution.get("site_type", "all")
@@ -372,30 +428,16 @@ def populate_surface_with_fragment(
 
     # --- 2. 验证规划与位点的兼容性 (Connectivity 过滤) ---
     site_df_filtered = s.site_df
-    
     if site_type == "ontop":
-        if plan_orientation != "end-on":
-            raise ValueError(f"规划不匹配：'ontop' 位点 (connectivity=1) 与 '{plan_orientation}' 朝向不兼容。")
         site_df_filtered = s.site_df[s.site_df.connectivity == 1]
-        
     elif site_type == "bridge":
-        if plan_orientation != "side-on":
-             # 允许 'end-on' 模式在 'bridge' 位点上 (例如 H 在桥上)
-             if plan_orientation not in ["side-on", "end-on"]:
-                raise ValueError(f"规划不匹配：'bridge' 位点 (connectivity=2) 与 '{plan_orientation}' 朝向不兼容。")
         site_df_filtered = s.site_df[s.site_df.connectivity == 2]
-
     elif site_type == "hollow":
         site_df_filtered = s.site_df[s.site_df.connectivity >= 3]
-        if plan_orientation not in ["end-on"]:
-             print(f"--- 🛠️ 警告: 尝试将 '{plan_orientation}' 放置在 'hollow' 位点上。这可能不是一个稳定的构型。 ---")
-
     elif site_type == "all":
-         print(f"--- 🛠️ 正在搜索 'all' 位点... ---")
-         site_df_filtered = s.site_df
-    
+        site_df_filtered = s.site_df
     else:
-        raise ValueError(f"未知的 site_type: '{site_type}'。必须是 'ontop', 'bridge', 'hollow', 或 'all'。")
+        raise ValueError(f"未知的 site_type: '{site_type}'。")
 
     # --- 3. 可选的表面原子过滤 ---
     allowed_symbols = plan_solution.get("surface_binding_atoms")
@@ -418,15 +460,15 @@ def populate_surface_with_fragment(
     s.site_df = site_df_filtered
     site_index_arg = list(s.site_df.index)
     
-    print(f"--- 🛠️ 规划已验证：正在搜索 {len(site_index_arg)} 个 '{site_type}' (过滤后) 位点以用于 '{plan_orientation}' 吸附。 ---")
+    print(f"--- 🛠️ 规划已验证：正在搜索 {len(site_index_arg)} 个 '{site_type}' (过滤后) 位点。 ---")
 
     if len(site_index_arg) == 0:
         raise ValueError(f"未找到 '{site_type}' 类型且包含 {allowed_symbols} 的位点。无法继续。")
 
     # --- 4. 决定 sample_rotation ---
     sample_rotation = True
-    if plan_orientation == "side-on":
-        print("--- 🛠️ 检测到 'side-on' 模式。禁用 sample_rotation。---")
+    if num_binding_indices == 2:
+        print("--- 🛠️ 检测到 2-index (side-on) 模式。禁用 sample_rotation。---")
         sample_rotation = False
 
     # --- 5. 调用库 ---
@@ -584,6 +626,7 @@ def analyze_relaxation_results(
     relaxed_trajectory_file: str, 
     slab_atoms: ase.Atoms,
     original_smiles: str,
+    plan_dict: dict,
     e_surface_ref: float = 0.0,
     e_adsorbate_ref: float = 0.0
 ) -> str:
@@ -607,9 +650,15 @@ def analyze_relaxation_results(
         relaxed_atoms = traj[best_index]
 
         E_ads = min_energy_total - e_surface_ref - e_adsorbate_ref
-        print(f"--- Analysis: E_total = {min_energy_total:.4f} eV")
-        print(f"--- Analysis: E_ads = {E_ads:.4f} eV (E_surf={e_surface_ref:.4f}, E_ads_mol={e_adsorbate_ref:.4f}) ---")
+        print(f"--- Analysis: E_ads = {E_ads:.4f} eV (E_total = {min_energy_total:.4f} eV, E_surf={e_surface_ref:.4f}, E_ads_mol={e_adsorbate_ref:.4f}) ---")
         
+        # --- 从 plan_dict 检索信息 ---
+        plan_solution = plan_dict.get("solution", {})
+        adsorbate_type = plan_dict.get("adsorbate_type")
+        site_type = plan_solution.get("site_type")
+        binding_atom_indices = plan_solution.get("adsorbate_binding_indices", [])
+        num_binding_indices = len(binding_atom_indices)
+
         # 1.1. 从 .info 字典中获取规划的位点信息
         planned_info = relaxed_atoms.info.get("adsorbate_info", {}).get("site", {})
         planned_connectivity = planned_info.get("connectivity")
@@ -626,9 +675,9 @@ def analyze_relaxation_results(
         actual_bonded_slab_indices = set()
         anchor_atom_indices = []
         
-        if orientation == "end-on":
+        if num_binding_indices == 1:
             anchor_atom_indices = [adsorbate_indices_check[0]]
-        elif orientation == "side-on":
+        elif num_binding_indices == 2:
             if len(adsorbate_indices_check) >= 2:
                 anchor_atom_indices = [adsorbate_indices_check[0], adsorbate_indices_check[1]]
         
@@ -666,13 +715,13 @@ def analyze_relaxation_results(
         # 准备共价键检查
         cov_cutoffs = natural_cutoffs(relaxed_atoms, mult=1)
 
-        if orientation == "end-on":
+        if num_binding_indices == 1:
             # 目标原子 *总是* 吸附物列表中的第一个
             target_atom_global_index = adsorbate_indices[0]
             target_atom_symbol = relaxed_atoms[target_atom_global_index].symbol
             target_atom_pos = relaxed_atoms[target_atom_global_index].position
 
-            print(f"--- 分析: (end-on 模式) 正在检查第一个吸附物原子, 符号: '{target_atom_symbol}', 全局索引: {target_atom_global_index}。---")
+            print(f"--- 分析: (1-index 模式) 正在检查第一个吸附物原子, 符号: '{target_atom_symbol}', 全局索引: {target_atom_global_index}。---")
 
             # 4. 计算该原子与表面的最近距离
             distances = np.linalg.norm(slab_atoms_relaxed.positions - target_atom_pos, axis=1)
@@ -714,7 +763,7 @@ def analyze_relaxation_results(
                 }
             }
         
-        elif orientation == "side-on":
+        elif num_binding_indices == 2:
             if len(adsorbate_indices) < 2:
                  return json.dumps({"status": "error", "message": f"Side-on 模式需要至少 2 个吸附物原子，但只找到 {len(adsorbate_indices)} 个。"})
             
@@ -724,7 +773,7 @@ def analyze_relaxation_results(
             target_atom_global_index = adsorbate_indices[0]
             target_atom_symbol = relaxed_atoms[target_atom_global_index].symbol
             target_atom_pos = relaxed_atoms[target_atom_global_index].position
-            print(f"--- 分析: (side-on 模式) 正在检查第一个吸附物原子, 符号: '{target_atom_symbol}', 全局索引: {target_atom_global_index}。---")
+            print(f"--- 分析: (2-index 模式) 正在检查第一个吸附物原子, 符号: '{target_atom_symbol}', 全局索引: {target_atom_global_index}。---")
 
             distances = np.linalg.norm(slab_atoms_relaxed.positions - target_atom_pos, axis=1)
             min_distance = np.min(distances)
@@ -789,7 +838,7 @@ def analyze_relaxation_results(
             }
 
         else:
-             return json.dumps({"status": "error", "message": f"分析失败：未知的朝向 '{orientation}'。"})
+             return json.dumps({"status": "error", "message": f"分析失败：不支持的键合索引数量 {num_binding_indices}。"})
 
         # 6. 保存最终结构
         best_atoms_filename = f"outputs/BEST_{original_smiles.replace('=','_').replace('#','_')}_on_surface.xyz"
