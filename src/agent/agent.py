@@ -167,57 +167,50 @@ def plan_validator_node(state: AgentState) -> dict:
 
     plan_json = state.get("plan")
     if plan_json is None:
-        print("--- 验证失败: Planner未能生成有效JSON。---")
-        return {"validation_error": state.get("validation_error", "False, Planner 节点未能生成 JSON。")}
-    
+        print("--- Validation Failed: Planner failed to generate valid JSON. ---")
+        return {"validation_error": state.get("validation_error", "False, Planner node failed to generate valid JSON.")}
     if "solution" not in plan_json:
-        error = "False, 方案 JSON 丢失 'solution' 键。"
-        print(f"--- 验证失败: {error} ---")
+        error = "False, Plan JSON missing 'solution' key."
+        print(f"--- Validation Failed: {error} ---")
         return {"validation_error": error}
-        
-    plan = plan_json.get("solution", {})
-    if not plan:
-        error = "False, 方案 JSON 丢失或格式错误（'solution' 键为空）。"
-        print(f"--- 验证失败: {error} ---")
+    
+    adsorbate_type = plan_json.get("adsorbate_type")
+    if adsorbate_type not in ["Molecule", "ReactiveSpecies"]:
+        error = f"False, Plan JSON missing or invalid `adsorbate_type` field (must be 'Molecule' or 'ReactiveSpecies')."
+        print(f"--- Validation Failed: {error} ---")
         return {"validation_error": error}
 
-    orientation = plan.get("orientation", "")
+    plan = plan_json.get("solution", {})
+    if not plan:
+        error = "False, Plan JSON missing or malformed ('solution' key is empty)."
+        print(f"--- Validation Failed: {error} ---")
+        return {"validation_error": error}
+
     site_type = plan.get("site_type", "")
     surf_atoms = plan.get("surface_binding_atoms", [])
     ads_indices = plan.get("adsorbate_binding_indices", [])
-    if site_type == "ontop" and len(surf_atoms) != 1:
-        error = f"False, Rule 1: Python check failed. site_type is 'ontop' but surface_binding_atoms has {len(surf_atoms)} members (should be 1)."
-        print(f"--- 验证失败: {error} ---")
+    if site_type == "ontop" and len(ads_indices) != 1:
+        error = f"False, Rule 2: Python check failed. site_type 'ontop' 必须与 1 个索引 (end-on) 配对，但提供了 {len(ads_indices)} 个。"
+        print(f"--- Validation Failed: {error} ---")
         return {"validation_error": error}
-    if site_type == "bridge" and len(surf_atoms) != 2:
-        error = f"False, Rule 1: Python check failed. site_type is 'bridge' but surface_binding_atoms has {len(surf_atoms)} members (should be 2)."
-        print(f"--- 验证失败: {error} ---")
+    if site_type == "bridge" and len(ads_indices) not in [1, 2]:
+        error = f"False, Rule 2: Python check failed. site_type 'bridge' 必须与 1 个 (end-on) 或 2 个 (side-on) 索引配对，但提供了 {len(ads_indices)} 个。"
+        print(f"--- Validation Failed: {error} ---")
         return {"validation_error": error}
-    if site_type == "hollow" and len(surf_atoms) < 3: 
-        error = f"False, Rule 1: Python check failed. site_type is 'hollow' but surface_binding_atoms has {len(surf_atoms)} members (should be >= 3)."
-        print(f"--- 验证失败: {error} ---")
+    if site_type == "hollow" and len(ads_indices) not in [1, 2]:
+        error = f"False, Rule 2: Python check failed. site_type 'hollow' 必须与 1 个 (end-on) 或 2 个 (side-on) 索引配对，但提供了 {len(ads_indices)} 个。"
+        print(f"--- Validation Failed: {error} ---")
         return {"validation_error": error}
-    if orientation == "end-on" and len(ads_indices) != 1:
-        error = f"False, Rule 2: Python check failed. orientation is 'end-on' but adsorbate_binding_indices has {len(ads_indices)} members (should be 1)."
-        print(f"--- 验证失败: {error} ---")
-        return {"validation_error": error}
-    if orientation == "side-on":
-        if len(ads_indices) != 2:
-            error = f"False, Rule 2: Python check failed. orientation is 'side-on' but adsorbate_binding_indices has {len(ads_indices)} members (should be 2)."
-            print(f"--- 验证失败: {error} ---")
-            return {"validation_error": error}
-        elif site_type not in ["bridge", "hollow"]:
-            error = f"False, Rule 3: Python check failed. orientation 'side-on' is physically incompatible with site_type '{site_type}'. 'side-on' must use 'bridge' or 'hollow'."
-            print(f"--- 验证失败: {error} ---")
-            return {"validation_error": error}
-    print("--- 验证成功 ---")
+    
+    print("--- Validation Succeeded ---")
     return {"validation_error": None}
 
 def tool_executor_node(state: AgentState) -> dict:
     """ 节点 4: Tool Executor """
     print("--- 🛠️ 调用 Tool Executor 节点 ---")
     
-    plan_solution = state["plan"].get("solution", {})
+    plan_json = state.get("plan", {})
+    plan_solution = plan_json.get("solution", {})
 
     if not plan_solution:
         error_message = "Tool Executor 失败: 'plan' 中缺少 'solution' 字典。"
@@ -280,7 +273,7 @@ def tool_executor_node(state: AgentState) -> dict:
         fragment_object = create_fragment_from_plan(
             original_smiles=state["smiles"],
             binding_atom_indices=plan_solution.get("adsorbate_binding_indices"),
-            orientation=plan_solution.get("orientation"),
+            plan_dict=plan_json,
             to_initialize=plan_solution.get("conformers_per_site_cap", 5)
         )
         tool_logs.append(f"Success: Created fragment object from plan (SMILES: {state['smiles']}).")
@@ -352,8 +345,7 @@ def tool_executor_node(state: AgentState) -> dict:
             relaxed_trajectory_file=final_traj_file,
             slab_atoms=slab_atoms,
             original_smiles=state["smiles"],
-            binding_atom_indices=plan_solution.get("adsorbate_binding_indices"),
-            orientation=plan_solution.get("orientation"),
+            plan_dict=plan_json,
             e_surface_ref=E_surface,
             e_adsorbate_ref=E_adsorbate
         )

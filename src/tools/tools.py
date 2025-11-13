@@ -298,7 +298,7 @@ def _get_fragment(SMILES: str, orientation: str, to_initialize: int = 1) -> Unio
 def create_fragment_from_plan(
     original_smiles: str, 
     binding_atom_indices: list[int], 
-    orientation: str,
+    plan_dict: dict,
     to_initialize: int = 1
 ) -> Fragment:
     print(f"--- 🛠️ 正在执行 create_fragment_from_plan ... ---")
@@ -584,8 +584,6 @@ def analyze_relaxation_results(
     relaxed_trajectory_file: str, 
     slab_atoms: ase.Atoms,
     original_smiles: str,
-    binding_atom_indices: list[int],
-    orientation: str,
     e_surface_ref: float = 0.0,
     e_adsorbate_ref: float = 0.0
 ) -> str:
