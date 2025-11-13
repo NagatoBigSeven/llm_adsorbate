@@ -33,7 +33,6 @@ PLANNER_PROMPT = PromptTemplate(
    - `site_type`: 选择位点 (ontop / bridge / hollow)
    - `surface_binding_atoms`: 位点参与成键的表面原子 (例: ["Cu"] 或 ["Ni", "Fe", O""] )
    - `adsorbate_binding_indices`: 吸附物参与成键的原子**索引** (例: [0] 或 [0, 1])
-   - `orientation`: 选择朝向 (end-on 或 side-on)。
    - `relax_top_n`: 你想弛豫多少个能量最低的构型 (默认为 1)
    - `touch_sphere_size`: 位点搜索的半径 (默认为 2.8)
    - `overlap_thr`: 放置吸附物时允许的最小重叠距离 (默认为 0.1)
@@ -45,11 +44,11 @@ PLANNER_PROMPT = PromptTemplate(
 ### 输出格式 (严格的 JSON，无 Markdown 语法):
 {{
   "reasoning": "你的详细推理过程...",
+  "adsorbate_type": "Molecule" 或 "ReactiveSpecies",
   "solution": {{
     "site_type": "...",
     "surface_binding_atoms": [...],
     "adsorbate_binding_indices": [...],
-    "orientation": "...",
     "relax_top_n": 1,
     "touch_sphere_size": 2.8,
     "overlap_thr": 0.1,
@@ -60,10 +59,25 @@ PLANNER_PROMPT = PromptTemplate(
 ---
 
 ### ⚠️ 关键限制（必须严格遵守）:
-- `orientation` 必须是 'end-on' 或 'side-on'。
-- `orientation`: 'end-on' 可以与 `site_type`: 'ontop', 'bridge', 或 'hollow' 结合使用。
-- `orientation`: 'side-on' 可以与 `site_type`: 'bridge' 或 'hollow' 结合使用，但**不能**与 'ontop' 结合使用。
-- `adsorbate_binding_indices` 的长度必须是 1 (end-on) 或 2 (side-on)。
+
+**1. 化学类型规则**
+你必须根据库的定义 规划 `adsorbate_type`:
+  - **`adsorbate_type`: "Molecule"**:
+    - 用于吸附**完整的、稳定的分子** (如 `CH3OH` [SMILES: `CO`])。
+    - `adsorbate_binding_indices` **必须**指向具有孤对电子的原子 (例如 `CH3OH` 中的 O[1])。
+    - **禁止**规划 "Molecule" 通过其饱和原子 (如 `CH3OH` 中的 C[0]) 吸附，因为这是**非法**的。
+  - **`adsorbate_type`: "ReactiveSpecies"**:
+    - 用于吸附**片段/自由基** (如 `[CH3]` [SMILES: `[CH3]`], `[CH2]O` [SMILES: `[CH2]O`])。
+    - `adsorbate_binding_indices` **必须**指向具有单电子的原子 (例如 `[CH2]O` 中的 C[0])。
+    - **禁止**规划 "ReactiveSpecies" 通过其饱和原子 (如 `[CH2]CH3` 中的 C[1]) 吸附，因为这是**非法**的。
+
+**2. 位点对齐规则**
+`adsorbate_binding_indices` 的长度**决定**了朝向 (1 = end-on, 2 = side-on)。
+  - `site_type: "ontop"` **必须** 对应 `len(adsorbate_binding_indices) == 1` (end-on @ ontop)。
+  - `site_type: "bridge"` **必须** 对应 `len(adsorbate_binding_indices) == 1` (end-on @ bridge) 或 `2` (side-on @ bridge)。
+  - `site_type: "hollow"` **必须** 对应 `len(adsorbate_binding_indices) == 1` (end-on @ hollow) 或 `2` (side-on @ hollow)。
+
+**3. 其他规则**
 - 严禁提出 3 点及以上的吸附方案。
 - 若用户请求多点吸附，则在 `reasoning` 字段中解释限制并提出合理替代。(例: 用户请求 "让苯平躺"，你**不能**制定一个 6 点吸附的方案，你可能会提出苯的 'side-on' C-C 键吸附）。
 - 输出必须为**合法 JSON**，不得包含 ```json 或其他 Markdown 语法。
@@ -74,12 +88,12 @@ PLANNER_PROMPT = PromptTemplate(
 - **方案:** 一氧化碳通过 **碳原子** (索引为 0) 以 'end-on' 朝向键合在 'ontop' 位点。
 - **JSON:**
     {{
+      "adsorbate_type": "Molecule",
       "reasoning": "目标是 C-ontop 键合。表面是 Cu。SMILES [C-]#[O+] 中 C 的索引为 0。因此 surface_binding_atoms 是 ['Cu']。adsorbate_binding_indices 是 [0]，orientation 是 'end-on'。弛豫 top 1 即可。",
       "solution": {{
         "site_type": "ontop",
         "surface_binding_atoms": ["Cu"],
         "adsorbate_binding_indices": [0],
-        "orientation": "end-on",
         "relax_top_n": 1
       }}
     }}
@@ -91,12 +105,12 @@ PLANNER_PROMPT = PromptTemplate(
 - **方案:** 通过 **两个碳原子** (索引 0 和 1) 以 'side-on' 朝向键合在 'bridge' 位点 (由两个 Pd 原子构成)。
 - **JSON:**
     {{
+      "adsorbate_type": "Molecule",
       "reasoning": "目标是 C=C side-on 键合在 bridge 位点。表面是 Pd。SMILES C=C 中 C 的索引为 0 和 1。因此 surface_binding_atoms 是 ['Pd', 'Pd']。adsorbate_binding_indices 是 [0, 1]，orientation 是 'side-on'。弛豫 top 1。",
       "solution": {{
         "site_type": "bridge",
         "surface_binding_atoms": ["Pd", "Pd"],
         "adsorbate_binding_indices": [0, 1],
-        "orientation": "side-on",
         "relax_top_n": 1
       }}
     }}

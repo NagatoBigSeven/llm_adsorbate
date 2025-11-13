@@ -309,10 +309,10 @@ def tool_executor_node(state: AgentState) -> dict:
                 dyn_md_ads.run(md_steps)
                 
             # 协议 2: BFGS 优化 (与 relax_atoms 一致)
-            BFGS(adsorbate_only_atoms).run(fmax=opt_fmax, steps=opt_steps)
+            BFGS(adsorbate_only_atoms, trajectory=None, logfile=None).run(fmax=opt_fmax, steps=opt_steps)
             
             E_adsorbate = adsorbate_only_atoms.get_potential_energy()
-            tool_logs.append(f"成功: E_adsorbate = {E_adsorbate:.4f} eV。")
+            tool_logs.append(f"Success: E_adsorbate = {E_adsorbate:.4f} eV.")
             
         except Exception as e_ads_err:
             raise ValueError(f"计算 E_adsorbate 失败: {e_ads_err}")
