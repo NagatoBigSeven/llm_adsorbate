@@ -562,19 +562,57 @@ def relax_atoms(
     configs_to_relax = evaluated_configs[:N_RELAX_TOP_N]
     
     print(f"--- 🛠️ 评估完成。将从 {len(atoms_list)} 个构型中弛豫最好的 {N_RELAX_TOP_N} 个。---")
-
+    
     # --- 3. 弛豫阶段 (仅 N_RELAX_TOP_N) ---
     traj_file = f"outputs/relaxation_run.traj"
     traj = Trajectory(traj_file, 'w')
     final_structures = []
 
+    # 定义一个通用的、不依赖 autoadsorbate 库的键完整性检查器
+    def _get_bond_change_count(initial_adsorbate, final_adsorbate):
+        try:
+            if len(initial_adsorbate) != len(final_adsorbate):
+                return -2 # 原子数不匹配
+
+            # 1. 获取初始连接矩阵 (忽略 H-H 键)
+            initial_distances = initial_adsorbate.get_all_distances()
+            initial_cutoffs = natural_cutoffs(initial_adsorbate, mult=1.1)
+            initial_bonds = initial_distances < (np.array([initial_cutoffs]).T + initial_cutoffs)
+            np.fill_diagonal(initial_bonds, False)
+            h_indices_initial = [a.index for a in initial_adsorbate if a.symbol == 'H']
+            for i in h_indices_initial:
+                for j in h_indices_initial:
+                    initial_bonds[i, j] = False
+            
+            # 2. 获取最终连接矩阵 (忽略 H-H 键)
+            final_distances = final_adsorbate.get_all_distances()
+            final_cutoffs = natural_cutoffs(final_adsorbate, mult=1.1)
+            final_bonds = final_distances < (np.array([final_cutoffs]).T + final_cutoffs)
+            np.fill_diagonal(final_bonds, False)
+            h_indices_final = [a.index for a in final_adsorbate if a.symbol == 'H']
+            for i in h_indices_final:
+                for j in h_indices_final:
+                    final_bonds[i, j] = False
+
+            # 3. 比较
+            diff_matrix = initial_bonds.astype(int) - final_bonds.astype(int)
+            diff_upper = np.triu(diff_matrix)
+            bond_change_count = np.sum(np.abs(diff_upper))
+            return int(bond_change_count)
+
+        except Exception as e_bond:
+            print(f"--- 🛠️ 警告: 内部键完整性检查失败: {e_bond} ---")
+            return -1 # 标记为检查失败
+
     for i, (initial_energy, original_index, atoms) in enumerate(configs_to_relax):
         print(f"--- 弛豫最佳结构 {i+1}/{N_RELAX_TOP_N} (原始 Index {original_index}, E_pre={initial_energy:.4f} eV) ---")
         
-        # 计算器、约束和 MD 已经在评估阶段设置过
-        # 我们需要重新附加，因为我们存储的是副本
         atoms.calc = calculator
         atoms.set_constraint(constraint)
+
+        # --- 🛠️ 捕获弛豫前的吸附物状态 ---
+        adsorbate_indices_for_copy = list(range(len(slab_indices), len(atoms)))
+        initial_adsorbate = atoms.copy()[adsorbate_indices_for_copy]
         
         print(f"--- 优化 (BFGS): fmax={fmax}, steps={steps} ---")
         dyn_opt = BFGS(atoms, trajectory=None, logfile=None) 
@@ -582,6 +620,14 @@ def relax_atoms(
         dyn_opt.attach(lambda: traj.write(atoms), interval=1)
         
         dyn_opt.run(fmax=fmax, steps=steps)
+
+        # --- 🛠️ 捕获弛豫后的吸附物状态并检查键变化 ---
+        final_adsorbate = atoms.copy()[adsorbate_indices_for_copy]
+        
+        # 调用我们刚刚定义的内部函数
+        bond_change_count = _get_bond_change_count(initial_adsorbate, final_adsorbate)
+        atoms.info["bond_change_count"] = bond_change_count # 存储结果
+        print(f"--- 键完整性检查: {bond_change_count} 个键发生变化。 ---")
         
         final_energy = atoms.get_potential_energy()
         final_forces = atoms.get_forces()
@@ -652,6 +698,10 @@ def analyze_relaxation_results(
         E_ads = min_energy_total - e_surface_ref - e_adsorbate_ref
         print(f"--- Analysis: E_ads = {E_ads:.4f} eV (E_total = {min_energy_total:.4f} eV, E_surf={e_surface_ref:.4f}, E_ads_mol={e_adsorbate_ref:.4f}) ---")
         
+        # --- 提取新添加的键变化信息 ---
+        bond_change_count = relaxed_atoms.info.get("bond_change_count", -1) # -1 表示检查失败
+        reaction_detected = bond_change_count > 0
+
         # --- 从 plan_dict 检索信息 ---
         plan_solution = plan_dict.get("solution", {})
         adsorbate_type = plan_dict.get("adsorbate_type")
@@ -736,12 +786,13 @@ def analyze_relaxation_results(
             is_bound = min_distance <= bonding_cutoff
 
             analysis_message = (
-                f"最稳定构型吸附能: {E_ads:.4f} eV。 "
+                f"最稳定构型吸附能: {E_ads:.4f} eV。"
                 f"目标吸附物原子: {target_atom_symbol} (来自规划索引 {binding_atom_indices[0]}，在弛豫结构中为全局索引 {target_atom_global_index})。 "
                 f"最近的表面原子: {nearest_slab_atom_symbol} (Index {nearest_slab_atom_global_index})。 "
-                f"最终距离: {round(min_distance, 3)} Å. "
-                f"估计共价键阈值: {round(bonding_cutoff, 3)} Å. "
-                f"是否成键: {is_bound}."
+                f"最终距离: {round(min_distance, 3)} Å。"
+                f"估计共价键阈值: {round(bonding_cutoff, 3)} Å。"
+                f"是否成键: {is_bound}。"
+                f"是否发生反应性转变: {reaction_detected} (键变化数: {bond_change_count} )。"
             )
 
             result = {
@@ -755,6 +806,8 @@ def analyze_relaxation_results(
                 "final_bond_distance_A": round(min_distance, 3),
                 "estimated_covalent_cutoff_A": round(bonding_cutoff, 3),
                 "is_covalently_bound": bool(is_bound),
+                "reaction_detected": bool(reaction_detected),
+                "bond_change_count": int(bond_change_count),
                 "site_analysis": {
                     "planned_site_type": planned_site_type,
                     "planned_connectivity": planned_connectivity,
@@ -804,12 +857,13 @@ def analyze_relaxation_results(
             is_bound = bool(is_bound_1 and is_bound_2) 
             
             analysis_message = (
-                f"最稳定构型吸附能: {E_ads:.4f} eV。 "
-                f"目标原子 1: {target_atom_symbol} (来自规划索引 {binding_atom_indices[0]}，全局索引 {target_atom_global_index})。 "
-                f"  -> 最近: {nearest_slab_atom_symbol} (Index {nearest_slab_atom_global_index}), 距离: {round(min_distance, 3)} Å (阈值: {round(bonding_cutoff, 3)}), 成键: {is_bound_1}。 "
-                f"目标原子 2: {second_atom_symbol} (来自规划索引 {binding_atom_indices[1]}，全局索引 {second_atom_global_index})。 "
-                f"  -> 最近: {nearest_slab_atom_symbol_2} (Index {nearest_slab_atom_global_index_2}), 距离: {round(min_distance_2, 3)} Å (阈值: {round(bonding_cutoff_2, 3)}), 成键: {is_bound_2}。 "
-                f"整体是否成键: {is_bound}."
+                f"最稳定构型吸附能: {E_ads:.4f} eV。"
+                f"目标原子 1: {target_atom_symbol} (来自规划索引 {binding_atom_indices[0]}，全局索引 {target_atom_global_index})。"
+                f"  -> 最近: {nearest_slab_atom_symbol} (Index {nearest_slab_atom_global_index}), 距离: {round(min_distance, 3)} Å (阈值: {round(bonding_cutoff, 3)}), 成键: {is_bound_1}。"
+                f"目标原子 2: {second_atom_symbol} (来自规划索引 {binding_atom_indices[1]}，全局索引 {second_atom_global_index})。"
+                f"  -> 最近: {nearest_slab_atom_symbol_2} (Index {nearest_slab_atom_global_index_2}), 距离: {round(min_distance_2, 3)} Å (阈值: {round(bonding_cutoff_2, 3)}), 成键: {is_bound_2}。"
+                f"是否成键: {is_bound}。"
+                f"是否发生反应性转变: {reaction_detected} (键变化数: {bond_change_count} )。"
             )
 
             result = {
@@ -829,6 +883,8 @@ def analyze_relaxation_results(
                     "distance_A": round(min_distance_2, 3),
                     "is_bound": bool(is_bound_2)
                 },
+                "reaction_detected": bool(reaction_detected),
+                "bond_change_count": int(bond_change_count),
                 "site_analysis": {
                     "planned_site_type": planned_site_type,
                     "planned_connectivity": planned_connectivity,
