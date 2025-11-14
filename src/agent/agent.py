@@ -33,7 +33,7 @@ from src.tools.tools import (
 )
 from src.agent.prompts import PLANNER_PROMPT
 
-MAX_RETRIES = 4
+MAX_RETRIES = 3
 
 # --- 1. 定义智能体状态 (Agent State) ---
 class AgentState(TypedDict):
