@@ -89,7 +89,7 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
         # 6. 为我们关心的*成键原子*添加唯一的跟踪器
         target_atom_obj.SetAtomMapNum(114514)
 
-        out_smiles = Chem.MolToSmiles(new_mol.GetMol(), canonical=False)
+        out_smiles = Chem.MolToSmiles(new_mol.GetMol(), canonical=False, rootedAtAtom=marker_idx)
         # RDKit 现在会生成类似 "[Cl:1][C:114514]#O" 的SMILES
         print(f"--- 🔬 SMILES 翻译器输出: {out_smiles} ---")
         return out_smiles

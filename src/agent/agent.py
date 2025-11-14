@@ -480,19 +480,27 @@ def route_after_analysis(state: AgentState) -> str:
         if status == "fatal_error":
             print(f"--- 决策: 致命错误。流程结束。 ---")
             history_entry = f"致命错误: {analysis_data.get('message', '未知致命错误。')}"
+            current_history.append(history_entry)
+            state["history"] = current_history
             return "end"
 
         is_bound = analysis_data.get("is_covalently_bound", False) 
+        reaction_detected = analysis_data.get("reaction_detected", False)
+        bond_change_count = analysis_data.get("bond_change_count", 0)
         plan_str = json.dumps(state.get("plan", "{}"))
 
-        if status == "success" and is_bound:
+        if status == "success" and is_bound and not reaction_detected:
             # --- 成功逻辑 ---
             energy = analysis_data.get("most_stable_energy_eV", "N/A")
-            history_entry = f"成功的尝试: Plan={plan_str}, Result=键合成功, 能量={energy:.4f} eV。"
-            print(f"--- 决策: 找到稳定键合 (E={energy:.4f} eV)。记录并返回规划器继续搜索... ---")
-
+            history_entry = f"成功的尝试: Plan={plan_str}, Result=键合成功, 能量={energy:.4f} eV, 键变化数={bond_change_count}。"
+            print(f"--- 决策: 找到稳定键合 (E={energy:.4f} eV)。记录并返回规划器继续搜索。 ---")
+        elif status == "success" and reaction_detected:
+            # --- 失败逻辑 (发生了反应) ---
+            energy = analysis_data.get("most_stable_energy_eV", "N/A")
+            history_entry = f"失败的尝试: Plan={plan_str}, Result=检测到反应性转变 (键变化数={bond_change_count})。虽然最终能量为 {energy:.4f} eV，但该构型不稳定并已解离。"
+            print(f"--- 决策: 检测到反应性转变。记录并返回规划器重试。 ---")
         else:
-            # --- 失败逻辑 ---
+            # --- 失败逻辑 (未键合或计算失败) ---
             fail_reason = analysis_data.get("message", "计算失败或未键合。")
             if status == "success" and not is_bound:
                 if "atom_1" in analysis_data and "atom_2" in analysis_data: # side-on
@@ -500,16 +508,16 @@ def route_after_analysis(state: AgentState) -> str:
                     a1_bound = analysis_data["atom_1"].get("is_bound", False)
                     a2_dist = analysis_data["atom_2"].get("distance_A", "N/A")
                     a2_bound = analysis_data["atom_2"].get("is_bound", False)
-                    fail_reason = f"分析完成 (side-on)，但未完全键合。Atom 1 距离: {a1_dist} Å (Bound: {a1_bound}), Atom 2 距离: {a2_dist} Å (Bound: {a2_bound})."
+                    fail_reason = f"分析完成，但未完全键合。Atom 1 距离: {a1_dist} Å (是否成键: {a1_bound}), Atom 2 距离: {a2_dist} Å (是否成键: {a2_bound})."
                 
                 elif "final_bond_distance_A" in analysis_data: # end-on
                     dist = analysis_data.get("final_bond_distance_A", "N/A")
-                    fail_reason = f"分析完成 (end-on)，但吸附物未与表面键合。最终距离: {dist} Å。"
+                    fail_reason = f"分析完成，但吸附物未与表面键合。最终距离: {dist} Å。"
                 
                 else:
                     fail_reason = analysis_data.get("message", "分析完成，但 is_covalently_bound 为 false。")
 
-            history_entry = f"失败的尝试: Plan={plan_str}, Result={fail_reason}"
+            history_entry = f"失败的尝试: Plan={plan_str}, Result={fail_reason}。"
             print(f"--- 决策: 计算失败 ({fail_reason})。记录并返回规划器重试。 ---")
 
     except Exception as e:
