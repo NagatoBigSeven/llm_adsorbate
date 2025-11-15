@@ -25,10 +25,11 @@ PLANNER_PROMPT = PromptTemplate(
 3. **分析请求:** 用户的核心意图是什么？(例: *特定原子* 以 *特定朝向* 吸附在 *特定位点*)
 4. **分析吸附物 (SMILES: {smiles}):**
    - 主要官能团；
-   - 为所有 *非H的重原子* 分配索引 (仅逻辑推理，勿执行代码)。
-   - *示例1 (CCO - 乙醇)*: C[0], C[1], O[2]
-   - *示例2 (C=C - 乙烯)*: C[0], C[1]
-   - *示例3 ([C-]#[O+] - 一氧化碳)*: C[0], O[1]
+   - RDKit 库已分析此 SMILES 并返回了以下*事实*的重原子索引列表:
+   {autoadsorbate_context}
+   - **你的任务:** 严格*参考*上面的索引列表，在步骤 6 中选择正确的 `adsorbate_binding_indices`。
+   - *示例 (CCO - 乙醇)*: 如果索引列表是 [{"index": 0, "symbol": "C"}, {"index": 1, "symbol": "C"}, {"index": 2, "symbol": "O"}]，而你想通过 O 吸附，你必须选择 [2]。
+   - **警告:** 严禁*猜测*索引，必须使用上面提供的索引列表。如果索引不匹配，你的规划必然失败。
 5. **分析表面:** 从 `{slab_xyz_path}` 和 `{surface_composition}` 推测表面类型 (例: Cu(211) 或 NiFeO) 和主要元素组成 (例: Cu 或 Fe、Ni 和 O)，忽略 `surface_composition` 中的原子坐标，仅关注元素符号。
 6. **制定方案:**
    - `site_type`: 选择位点 (ontop / bridge / hollow)
