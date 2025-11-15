@@ -18,7 +18,7 @@ from ase import Atoms
 from typing import Union
 
 def get_atom_index_menu(original_smiles: str) -> str:
-    print(f"--- 🛠️ 正在为 {original_smiles} 生成 '原子菜单' ---")
+    print(f"--- 🛠️ 正在为 {original_smiles} 生成重原子索引列表 ---")
     try:
         mol = Chem.MolFromSmiles(original_smiles)
         if not mol:
@@ -30,12 +30,11 @@ def get_atom_index_menu(original_smiles: str) -> str:
                 "symbol": atom.GetSymbol()
             })
         heavy_atom_menu = [atom for atom in atom_list if atom["symbol"] != 'H']
-        print(f"--- 🛠️ '重原子菜单' 已生成: {json.dumps(heavy_atom_menu)} ---")
+        print(f"--- 🛠️ 重原子索引列表已生成: {json.dumps(heavy_atom_menu)} ---")
         return json.dumps(heavy_atom_menu, indent=2)
     except Exception as e:
         print(f"--- 🛑 get_atom_index_menu 失败: {e} ---")
-        return json.dumps({"error": f"无法生成原子菜单: {e}"})
-
+        return json.dumps({"error": f"无法生成重原子索引列表: {e}"})
 def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[int], site_type: str) -> str:
     print(f"--- 🔬 调用 SMILES 翻译器: {original_smiles} via indices {binding_atom_indices} (位点: {site_type}) ---")
     

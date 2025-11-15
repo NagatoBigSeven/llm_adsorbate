@@ -25,7 +25,8 @@ dependencies = [
     "mace-torch>=0.3.14",
     "numpy<2.0",
     "streamlit>=1.49.1",
-    "torch-dftd"
+    "torch-dftd",
+    "pymatgen"
 ]
 
 [tool.setuptools.packages]
