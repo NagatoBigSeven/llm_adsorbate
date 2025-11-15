@@ -24,12 +24,12 @@ from langgraph.graph import StateGraph, END
 from langchain_core.output_parsers import JsonOutputParser
 
 from src.tools.tools import (
-    read_atoms_object, 
+    read_atoms_object,
+    get_atom_index_menu,
     create_fragment_from_plan,
     populate_surface_with_fragment,
     relax_atoms, 
     save_ase_atoms,
-    analyze_relaxation_results,
 )
 from src.agent.prompts import PLANNER_PROMPT
 
@@ -103,6 +103,16 @@ def solution_planner_node(state: AgentState) -> dict:
     print("--- 🧠 调用 Planner 节点 ---")
     llm = get_llm()
     messages = []
+
+    try:
+        atom_menu_json = get_atom_index_menu(state["smiles"])
+        if "error" in atom_menu_json:
+            raise ValueError(atom_menu_json)
+    except Exception as e:
+        print(f"--- 🛑 fatal error: Unable to generate atom menu for SMILES {state['smiles']}: {e} ---")
+        return {
+            "validation_error": f"False, fatal error: Unable to generate atom menu for SMILES {state['smiles']}: {e}"
+        }
     
     prompt_input = {
         "smiles": state["smiles"],
@@ -110,7 +120,8 @@ def solution_planner_node(state: AgentState) -> dict:
         "surface_composition": state.get("surface_composition", "未知"),
         "user_request": state["user_request"],
         "history": "\n".join(state["history"]) if state.get("history") else "无",
-        "MAX_RETRIES": MAX_RETRIES
+        "MAX_RETRIES": MAX_RETRIES,
+        "autoadsorbate_context": atom_menu_json
     }
     
     if state.get("validation_error"):
