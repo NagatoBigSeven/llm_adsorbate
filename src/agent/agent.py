@@ -30,6 +30,7 @@ from src.tools.tools import (
     populate_surface_with_fragment,
     relax_atoms, 
     save_ase_atoms,
+    analyze_relaxation_results
 )
 from src.agent.prompts import PLANNER_PROMPT
 
