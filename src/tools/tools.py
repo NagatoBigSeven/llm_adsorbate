@@ -17,6 +17,25 @@ from rdkit.Chem import AllChem
 from ase import Atoms
 from typing import Union
 
+def get_atom_index_menu(original_smiles: str) -> str:
+    print(f"--- 🛠️ 正在为 {original_smiles} 生成 '原子菜单' ---")
+    try:
+        mol = Chem.MolFromSmiles(original_smiles)
+        if not mol:
+            raise ValueError(f"RDKit 无法解析 SMILES: {original_smiles}")
+        atom_list = []
+        for atom in mol.GetAtoms():
+            atom_list.append({
+                "index": atom.GetIdx(),
+                "symbol": atom.GetSymbol()
+            })
+        heavy_atom_menu = [atom for atom in atom_list if atom["symbol"] != 'H']
+        print(f"--- 🛠️ '重原子菜单' 已生成: {json.dumps(heavy_atom_menu)} ---")
+        return json.dumps(heavy_atom_menu, indent=2)
+    except Exception as e:
+        print(f"--- 🛑 get_atom_index_menu 失败: {e} ---")
+        return json.dumps({"error": f"无法生成原子菜单: {e}"})
+
 def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[int], site_type: str) -> str:
     print(f"--- 🔬 调用 SMILES 翻译器: {original_smiles} via indices {binding_atom_indices} (位点: {site_type}) ---")
     

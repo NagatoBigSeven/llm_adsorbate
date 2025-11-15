@@ -564,6 +564,7 @@ def _prepare_initial_state(smiles: str, slab_path: str, user_request: str) -> Ag
     return {
         "smiles": smiles,
         "slab_path": slab_path,
+        "surface_composition": None,
         "user_request": user_request,
         "plan": None,
         "validation_error": None,
