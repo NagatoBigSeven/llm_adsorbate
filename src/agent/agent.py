@@ -47,6 +47,8 @@ class AgentState(TypedDict):
     messages: List[BaseMessage]
     analysis_json: Optional[str]
     history: List[str]
+    best_result: Optional[dict]
+    attempted_keys: List[str]
 
 # --- 2. 设置环境和 LLM ---
 load_dotenv()
@@ -74,6 +76,35 @@ def get_llm():
     #     seed=42
     # )
     return llm
+
+def make_plan_key(plan_json: Optional[dict]) -> Optional[str]:
+    """
+    根据 plan 生成一个组合 key：
+    (site_type, sorted(surface_binding_atoms), sorted(adsorbate_binding_indices))
+
+    返回字符串，或者在信息不足时返回 None。
+    """
+    if not plan_json or not isinstance(plan_json, dict):
+        return None
+    try:
+        solution = plan_json.get("solution", {}) or {}
+        site_type = solution.get("site_type", "") or ""
+        surf_atoms = solution.get("surface_binding_atoms", []) or []
+        ads_indices = solution.get("adsorbate_binding_indices", []) or []
+
+        # 确保两者是 list，否则返回 None（不抛异常）
+        if not isinstance(surf_atoms, list) or not isinstance(ads_indices, list):
+            return None
+
+        # 统一转成字符串并排序，避免 ["Cu","Ni"] vs ["Ni","Cu"] 被当成不同
+        surf_atoms_str = ",".join(sorted(str(s) for s in surf_atoms))
+        ads_indices_str = ",".join(str(i) for i in sorted(ads_indices))
+
+        key = f"{site_type}|{surf_atoms_str}|{ads_indices_str}"
+        return key
+    except Exception as e:
+        print(f"--- ⚠️ make_plan_key 失败: {e} ---")
+        return None
 
 # --- 3. 定义 LangGraph 节点 ---
 def pre_processor_node(state: AgentState) -> dict:
@@ -213,7 +244,47 @@ def plan_validator_node(state: AgentState) -> dict:
         error = f"False, Rule 2: Python check failed. site_type 'hollow' 必须与 1 个 (end-on) 或 2 个 (side-on) 索引配对，但提供了 {len(ads_indices)} 个。"
         print(f"--- Validation Failed: {error} ---")
         return {"validation_error": error}
+    if not isinstance(surf_atoms, list):
+        error = "False, Plan JSON field 'surface_binding_atoms' 必须是列表。"
+        print(f"--- Validation Failed: {error} ---")
+        return {"validation_error": error}
+    if site_type == "ontop" and len(surf_atoms) != 1:
+        error = (
+            "False, Rule 2b: 'ontop' 位点要求 surface_binding_atoms 长度为 1，"
+            f"但当前为 {len(surf_atoms)}。"
+        )
+        print(f"--- Validation Failed: {error} ---")
+        return {"validation_error": error}
+    if site_type == "bridge" and len(surf_atoms) not in [1, 2]:
+        error = (
+            "False, Rule 2b: 'bridge' 位点要求 surface_binding_atoms 长度为 1 或 2，"
+            f"但当前为 {len(surf_atoms)}。"
+        )
+        print(f"--- Validation Failed: {error} ---")
+        return {"validation_error": error}
+    if site_type == "hollow" and len(surf_atoms) < 3:
+        error = (
+            "False, Rule 2b: 'hollow' 位点要求 surface_binding_atoms 至少包含 3 个元素，"
+            f"但当前为 {len(surf_atoms)}。"
+        )
+        print(f"--- Validation Failed: {error} ---")
+        return {"validation_error": error}
     
+    try:
+        attempted_keys = state.get("attempted_keys", [])
+        if not isinstance(attempted_keys, list):
+            attempted_keys = []
+        key = make_plan_key(plan_json)
+        if key is not None and key in attempted_keys:
+            error = (
+                "False, 该方案在 (site_type, surface_binding_atoms, adsorbate_binding_indices) "
+                "空间中已经尝试过，请规划一个不同的组合。"
+            )
+            print(f"--- Validation Failed: {error} ---")
+            return {"validation_error": error}
+    except Exception as e_dup:
+        print(f"--- ⚠️ Duplicate-check 过程中出现异常: {e_dup} ---")
+
     print("--- Validation Succeeded ---")
     return {"validation_error": None}
 
@@ -409,7 +480,50 @@ def final_analyzer_node(state: AgentState) -> dict:
         print(f"--- 原始字符串: {state.get('analysis_json')} ---")
         analysis_data = {"status": "error", "message": f"Analysis JSON was corrupted: {e}"}
     
-    if analysis_data.get("status") == "success" and analysis_data.get("is_covalently_bound", False):
+    # --- 优先使用全局最优方案，如果存在的话 ---
+    best = state.get("best_result")
+    best_analysis = None
+    best_plan = None
+
+    if isinstance(best, dict):
+        _a = best.get("analysis_json")
+        if isinstance(_a, dict) and _a.get("status") == "success" and _a.get("is_covalently_bound", False):
+            best_analysis = _a
+            best_plan = best.get("plan")
+
+    # 如果有全局最优，就用它；否则退回最后一次 analysis_json
+    if best_analysis is not None:
+        print("--- ✍️ Final Analyzer: 使用全局最优方案生成报告 ---")
+        success_analysis = best_analysis
+        success_plan = best_plan or {}
+        analysis_json_for_prompt = json.dumps(success_analysis)
+        plan_str = json.dumps(success_plan)
+        status_flag = "success"
+    else:
+        print("--- ✍️ Final Analyzer: 未找到全局最优方案，使用最后一次分析结果 ---")
+        analysis_data = {}
+        try:
+            analysis_json_str = state.get("analysis_json")
+            if not analysis_json_str:
+                analysis_data = {"status": "error", "message": "分析 JSON 丢失或为空。"}
+            else:
+                analysis_data = json.loads(analysis_json_str)
+        except json.JSONDecodeError as e:
+            print(f"--- 🛑 Final Analyzer: JSON 解析失败 {e} ---")
+            print(f"--- 原始字符串: {state.get('analysis_json')} ---")
+            analysis_data = {"status": "error", "message": f"Analysis JSON was corrupted: {e}"}
+
+        if analysis_data.get("status") == "success" and analysis_data.get("is_covalently_bound", False):
+            success_analysis = analysis_data
+            success_plan = state.get("plan", {})
+            analysis_json_for_prompt = state.get("analysis_json", "{}")
+            plan_str = json.dumps(success_plan)
+            status_flag = "success"
+        else:
+            success_analysis = analysis_data
+            status_flag = "failure"
+
+    if status_flag == "success":
         final_prompt = """
         你是一名计算化学专家。
         你的规划和计算任务已成功执行，并且自动化分析工具已返回了 *基于事实* 的数据。
@@ -427,18 +541,27 @@ def final_analyzer_node(state: AgentState) -> dict:
         3.  **提供关键信息:** 报告最稳定的能量、键长和保存的最佳结构文件名 (`best_structure_file`)。
         4.  **禁止幻觉:** 你的报告必须 100% 建立在上述 JSON 数据的客观事实上。
         """
-        plan_str = json.dumps(state.get("plan", "{}"))
         prompt = final_prompt.format(
-            plan=plan_str, 
-            analysis_json=state["analysis_json"], 
+            plan=plan_str,
+            analysis_json=analysis_json_for_prompt,
             user_request=state["user_request"]
         )
-    
     else:
-        fail_message = analysis_data.get("message", "未知的分析错误。")
-        if analysis_data.get("status") == "success" and not analysis_data.get("is_covalently_bound", False):
-             fail_message = f"分析完成，但吸附物未与表面键合 (is_covalently_bound: false)。最终距离: {analysis_data.get('final_bond_distance_A', 'N/A')} Å。"
-        
+        fail_message = success_analysis.get("message", "未知的分析错误。")
+        if success_analysis.get("status") == "success" and not success_analysis.get("is_covalently_bound", False):
+            if "atom_1" in success_analysis and "atom_2" in success_analysis:
+                a1 = success_analysis["atom_1"]
+                a2 = success_analysis["atom_2"]
+                fail_message = (
+                    f"分析完成，但未完全键合。Atom 1 距离: {a1.get('distance_A', 'N/A')} Å "
+                    f"(是否成键: {a1.get('is_bound', False)}), "
+                    f"Atom 2 距离: {a2.get('distance_A', 'N/A')} Å "
+                    f"(是否成键: {a2.get('is_bound', False)})."
+                )
+            elif "final_bond_distance_A" in success_analysis:
+                dist = success_analysis.get("final_bond_distance_A", "N/A")
+                fail_message = f"分析完成，但吸附物未与表面键合。最终距离: {dist} Å。"
+
         final_prompt = """
         你是一个错误报告助手。
         计算任务执行失败或未能找到稳定的键合构型。
@@ -504,7 +627,29 @@ def route_after_analysis(state: AgentState) -> str:
         if status == "success" and is_bound and not reaction_detected:
             # --- 成功逻辑 ---
             energy = analysis_data.get("most_stable_energy_eV", "N/A")
-            history_entry = f"成功的尝试: Plan={plan_str}, Result=键合成功, 能量={energy:.4f} eV, 键变化数={bond_change_count}。"
+            
+            # 更新全局最优结果（best_result）
+            try:
+                if isinstance(energy, (int, float)):
+                    best = state.get("best_result")
+                    current_best = None
+                    if isinstance(best, dict):
+                        current_best = best.get("most_stable_energy_eV", None)
+
+                    if (current_best is None) or (energy < current_best):
+                        print(f"--- 🌟 更新全局最优方案: E_ads 从 {current_best} → {energy:.4f} eV ---")
+                        state["best_result"] = {
+                            "most_stable_energy_eV": float(energy),
+                            "analysis_json": analysis_data,
+                            "plan": state.get("plan"),
+                        }
+            except Exception as e_best:
+                print(f"--- ⚠️ 更新 best_result 失败: {e_best} ---")
+
+            history_entry = (
+                f"成功的尝试: Plan={plan_str}, "
+                f"Result=键合成功, 能量={energy:.4f} eV, 键变化数={bond_change_count}。"
+            )
             print(f"--- 决策: 找到稳定键合 (E={energy:.4f} eV)。记录并返回规划器继续搜索。 ---")
         elif status == "success" and reaction_detected:
             # --- 失败逻辑 (发生了反应) ---
@@ -535,6 +680,19 @@ def route_after_analysis(state: AgentState) -> str:
     except Exception as e:
         print(f"--- 决策: 分析路由失败 ({e})。返回规划器重试。 ---")
         history_entry = f"分析路由失败: {e}"
+
+    # --- 记录已经尝试过的组合 key，用于后续防重复 ---
+    try:
+        attempted_keys = state.get("attempted_keys", [])
+        if not isinstance(attempted_keys, list):
+            attempted_keys = []
+        plan_json = state.get("plan")
+        key = make_plan_key(plan_json)
+        if key is not None and key not in attempted_keys:
+            attempted_keys.append(key)
+        state["attempted_keys"] = attempted_keys
+    except Exception as e_keys:
+        print(f"--- ⚠️ 记录 attempted_keys 失败: {e_keys} ---")
 
     # --- 统一的路由逻辑 ---
     current_history.append(history_entry)
@@ -582,7 +740,9 @@ def _prepare_initial_state(smiles: str, slab_path: str, user_request: str) -> Ag
         "validation_error": None,
         "messages": [HumanMessage(content=f"SMILES: {smiles}\nSLAB: {slab_path}\nREQUEST: {user_request}")],
         "analysis_json": None,
-        "history": []
+        "history": [],
+        "best_result": None,
+        "attempted_keys": []
     }
 
 def parse_args():
