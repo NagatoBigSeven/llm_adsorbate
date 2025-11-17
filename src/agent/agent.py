@@ -26,6 +26,7 @@ from langchain_core.output_parsers import JsonOutputParser
 from src.tools.tools import (
     read_atoms_object,
     get_atom_index_menu,
+    prepare_slab,
     create_fragment_from_plan,
     populate_surface_with_fragment,
     relax_atoms, 
@@ -34,7 +35,7 @@ from src.tools.tools import (
 )
 from src.agent.prompts import PLANNER_PROMPT
 
-MAX_RETRIES = 3
+MAX_RETRIES = 5
 
 # --- 1. 定义智能体状态 (Agent State) ---
 class AgentState(TypedDict):
@@ -308,11 +309,16 @@ def tool_executor_node(state: AgentState) -> dict:
     analysis_json = None
     
     try:
-        slab_atoms = read_atoms_object(slab_path)
+        # 1. 读取原始 Slab
+        raw_slab_atoms = read_atoms_object(slab_path)
         tool_logs.append(f"成功: 已从 {slab_path} 读取 slab 原子。")
-    
-        # --- 计算参考态能量 (E_surface 和 E_adsorbate) ---
-        # 1. 初始化一个统一的计算器和 *一致的* 弛豫参数
+
+        # 2. 在计算任何能量之前，先统一处理 Slab
+        final_slab_atoms, is_expanded = prepare_slab(raw_slab_atoms)
+        if is_expanded:
+            tool_logs.append("注意: 为了物理准确性，Slab 已被自动扩胞 (2x2)。")
+        
+        # 3. 初始化计算器
         try:
             import torch
             from ase import units
@@ -335,9 +341,9 @@ def tool_executor_node(state: AgentState) -> dict:
         except Exception as e_calc:
             raise ValueError(f"Failed to initialize MACE calculator: {e_calc}")
 
-        # 2. 计算 E_surface
+        # 4. 计算 E_surface
         try:
-            e_surf_atoms = slab_atoms.copy()
+            e_surf_atoms = final_slab_atoms.copy()
             e_surf_atoms.calc = temp_calc
 
             # *** 应用与 relax_atoms *完全一致* 的约束 ***
@@ -352,7 +358,8 @@ def tool_executor_node(state: AgentState) -> dict:
             
         except Exception as e_surf_err:
             raise ValueError(f"Failed to calculate E_surface: {e_surf_err}")
-    
+
+        # 5. 创建 Fragment
         fragment_object = create_fragment_from_plan(
             original_smiles=state["smiles"],
             binding_atom_indices=plan_solution.get("adsorbate_binding_indices"),
@@ -361,6 +368,7 @@ def tool_executor_node(state: AgentState) -> dict:
         )
         tool_logs.append(f"Success: Created fragment object from plan (SMILES: {state['smiles']}).")
 
+        # 6. 计算 E_adsorbate
         try:
             adsorbate_only_atoms = fragment_object.conformers[0].copy()
             
@@ -393,8 +401,9 @@ def tool_executor_node(state: AgentState) -> dict:
         except Exception as e_ads_err:
             raise ValueError(f"计算 E_adsorbate 失败: {e_ads_err}")
 
+        # 7. 放置吸附物
         generated_traj_file = populate_surface_with_fragment(
-            slab_atoms=slab_atoms,
+            slab_atoms=final_slab_atoms,
             fragment_object=fragment_object,
             plan_solution=plan_solution
         )
@@ -404,8 +413,9 @@ def tool_executor_node(state: AgentState) -> dict:
         if not initial_conformers or len(initial_conformers) == 0:
             raise ValueError(f"populate_surface_with_fragment 未能生成任何构型 (轨迹文件为空: {generated_traj_file})。")
         
+        # 8. 结构弛豫
         print("--- ⏳ 开始结构弛豫... ---")
-        slab_indices = list(range(len(slab_atoms)))
+        slab_indices = list(range(len(final_slab_atoms)))
         relax_n = plan_solution.get("relax_top_n", 1)
         device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"--- 🛠️ MACE 将使用设备: {device} ---")
@@ -423,10 +433,11 @@ def tool_executor_node(state: AgentState) -> dict:
         )
         tool_logs.append(f"成功: 结构弛豫完成 (弛豫了 Top {relax_n})。轨迹保存在 '{final_traj_file}'。")
         
+        # 9. 分析结果
         print("--- 🔬 调用分析工具... ---")
         analysis_json_str = analyze_relaxation_results(
             relaxed_trajectory_file=final_traj_file,
-            slab_atoms=slab_atoms,
+            slab_atoms=final_slab_atoms,
             original_smiles=state["smiles"],
             plan_dict=plan_json,
             e_surface_ref=E_surface,
@@ -435,20 +446,6 @@ def tool_executor_node(state: AgentState) -> dict:
         tool_logs.append(f"成功: 分析工具已执行。")
         print(f"--- 🔬 分析结果: {analysis_json_str} ---")
         analysis_json = json.loads(analysis_json_str)
-        
-    except ValueError as e: # 特别捕获 _get_fragment 的失败
-        if "RDKit" in str(e):
-            # 这是一个致命的、不可重试的 SMILES 错误
-            error_message = f"致命错误：RDKit 无法为 SMILES '{state['smiles']}' 生成构象: {e}"
-            print(f"--- 🛑 {error_message} ---")
-            analysis_json = {"status": "fatal_error", "message": error_message}
-            # 不要抛出异常，而是返回这个特殊的 analysis_json
-            return {
-                "messages": [ToolMessage(content=error_message, tool_call_id="tool_executor")],
-                "analysis_json": json.dumps(analysis_json)
-            }
-        else:
-            raise e # 重新抛出，让外层捕获
 
     except Exception as e:
         error_message = str(e)
@@ -598,7 +595,6 @@ def route_after_validation(state: AgentState) -> str:
         return "tool_executor"
 
 import json # 确保 json 已导入
-...
 
 def route_after_analysis(state: AgentState) -> str:
     """
@@ -761,7 +757,10 @@ def main_cli():
     agent_executor = get_agent_executor()
     print("\n--- 🚀 Adsorb-Agent 已启动 ---\n")
     final_state = None
-    for chunk in agent_executor.stream(initial_state, stream_mode="values"):
+
+    config = {"recursion_limit": 30}
+
+    for chunk in agent_executor.stream(initial_state, config=config, stream_mode="values"):
         final_state = chunk
         if "messages" in final_state and final_state["messages"]:
             last_message = final_state["messages"][-1]

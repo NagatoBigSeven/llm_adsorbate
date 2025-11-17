@@ -15,7 +15,7 @@ import json
 from rdkit import Chem
 from rdkit.Chem import AllChem
 from ase import Atoms
-from typing import Union
+from typing import Union, Tuple
 
 def get_atom_index_menu(original_smiles: str) -> str:
     print(f"--- 🛠️ 正在为 {original_smiles} 生成重原子索引列表 ---")
@@ -35,6 +35,7 @@ def get_atom_index_menu(original_smiles: str) -> str:
     except Exception as e:
         print(f"--- 🛑 get_atom_index_menu 失败: {e} ---")
         return json.dumps({"error": f"无法生成重原子索引列表: {e}"})
+
 def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[int], site_type: str) -> str:
     print(f"--- 🔬 调用 SMILES 翻译器: {original_smiles} via indices {binding_atom_indices} (位点: {site_type}) ---")
     
@@ -168,6 +169,38 @@ def read_atoms_object(slab_path: str) -> ase.Atoms:
         print(f"错误: 无法读取 {slab_path}: {e}")
         raise
 
+# --- 统一处理表面的扩胞和清理 ---
+def prepare_slab(slab_atoms: ase.Atoms) -> Tuple[ase.Atoms, bool]:
+    """
+    清理 Slab 的元数据，并根据需要进行扩胞 (Supercell)，以确保物理模拟的准确性。
+    返回: (处理后的 Slab, 是否进行了扩胞)
+    """
+    print("--- 🛠️ [Prepare] 正在清理 Slab 元数据并检查尺寸... ---")
+    
+    # 1. 清理元数据 (解决 autoadsorbate 解析 extxyz 额外列时的崩溃问题)
+    symbols = slab_atoms.get_chemical_symbols()
+    positions = slab_atoms.get_positions()
+    cell = slab_atoms.get_cell()
+    pbc = slab_atoms.get_pbc()
+    
+    clean_slab = ase.Atoms(symbols=symbols, positions=positions, cell=cell, pbc=pbc)
+    
+    # 2. 智能扩胞 (解决 1x1 晶胞找不到 Hollow 位点的问题)
+    # 逻辑: 如果 XY 平面任意晶格矢量长度小于 6.0 Å，则扩胞为 2x2
+    cell_vectors = clean_slab.get_cell()
+    a_len = np.linalg.norm(cell_vectors[0])
+    b_len = np.linalg.norm(cell_vectors[1])
+    
+    is_expanded = False
+    if a_len < 6.0 or b_len < 6.0:
+        print(f"--- 🛠️ [Prepare] 检测到微小晶胞 (a={a_len:.2f}Å, b={b_len:.2f}Å)。正在扩胞为 2x2x1... ---")
+        clean_slab = clean_slab * (2, 2, 1)
+        is_expanded = True
+    else:
+        print(f"--- 🛠️ [Prepare] 晶胞尺寸足够 (a={a_len:.2f}Å, b={b_len:.2f}Å)。保持原样。 ---")
+        
+    return clean_slab, is_expanded
+
 def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_initialize: int = 1) -> Union[Fragment, ase.Atoms]:
     # 确定 TRICK_SMILES，以便稍后设置 .info["smiles"]
     TRICK_SMILES = ""
@@ -266,12 +299,17 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
 
                     p1 = positions[t1_idx]
 
-                    # 将 S 标记放置在成键原子的 x-y 平面上方和下方
-                    positions[s1_idx] = p1 + np.array([0.5, 0.0, 0.0]) # 任意非平行向量
-                    positions[s2_idx] = p1 - np.array([0.5, 0.0, 0.0])
+                    # --- 防止 autoadsorbate 除以零或生成零向量 ---
+                    # 1. 垂直向量 (S1-S2)
+                    v_perp = np.array([0.0, 0.5, 0.0])
+                    # 2. 倾斜的中点，使 nvector (p1-midpoint) 既非零也不平行于 Z 轴
+                    midpoint = p1 - np.array([0.1, 0.0, 1.0])
 
-                    print(f"--- 🛠️ _get_fragment: 已手动对齐 S-S 标记用于 End-on 模式。 ---")
+                    # 放置 S1 和 S2
+                    positions[s1_idx] = midpoint + v_perp
+                    positions[s2_idx] = midpoint - v_perp
 
+                    print(f"--- 🛠️ _get_fragment: 已手动对齐 S-S 标记用于 End-on 模式 (倾斜修正)。 ---")
                     all_rdkit_atoms[t1_idx].SetAtomMapNum(0)
                 elif num_binding_indices == 2:
                     # --- side-on @ bridge/hollow ---
@@ -411,22 +449,26 @@ def populate_surface_with_fragment(
 ) -> str:
     # --- 1. 从 Fragment 对象中检索规划 ---
     if not hasattr(fragment_object, "info") or "plan_site_type" not in fragment_object.info:
-        raise ValueError("Fragment 对象缺少 'plan_site_type' 信息。请使用 'create_fragment_from_plan' 创建它。")
-        
-    site_type = fragment_object.info["plan_site_type"]
-    num_binding_indices = len(fragment_object.info["plan_binding_atom_indices"])
+        raise ValueError("Fragment 对象缺少 'plan_site_type' 信息。")
 
     # --- 从规划中读取参数 (或使用默认值) ---
     site_type = plan_solution.get("site_type", "all")
     conformers_per_site_cap = plan_solution.get("conformers_per_site_cap", 2)
     overlap_thr = plan_solution.get("overlap_thr", 0.1)
-    touch_sphere_size = plan_solution.get("touch_sphere_size", 2.8)
+    touch_sphere_size = plan_solution.get("touch_sphere_size", 3)
 
     print(f"--- 🛠️ 正在初始化表面 (touch_sphere_size={touch_sphere_size})... ---")
     
+    # 为了安全起见，这里再次清理元数据，确保 autoadsorbate 接收到纯净的 Atoms 对象
+    symbols = slab_atoms.get_chemical_symbols()
+    positions = slab_atoms.get_positions()
+    cell = slab_atoms.get_cell()
+    pbc = slab_atoms.get_pbc()
+    clean_slab_atoms = ase.Atoms(symbols=symbols, positions=positions, cell=cell, pbc=pbc)
+
     # 明确设置 mode='slab'
     s = Surface(
-        slab_atoms, 
+        clean_slab_atoms,
         precision=1.0, 
         touch_sphere_size=touch_sphere_size,
         mode='slab'  # 明确设置模式，防止默认为 'dummy'
@@ -485,6 +527,7 @@ def populate_surface_with_fragment(
 
     # --- 4. 决定 sample_rotation ---
     sample_rotation = True
+    num_binding_indices = len(fragment_object.info["plan_binding_atom_indices"])
     if num_binding_indices == 2:
         print("--- 🛠️ 检测到 2-index (side-on) 模式。禁用 sample_rotation。---")
         sample_rotation = False

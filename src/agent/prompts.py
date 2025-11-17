@@ -36,7 +36,7 @@ PLANNER_PROMPT = PromptTemplate(
    - `surface_binding_atoms`: 位点参与成键的表面原子 (例: ["Cu"] 或 ["Ni", "Fe", O""] )
    - `adsorbate_binding_indices`: 吸附物参与成键的原子**索引** (例: [0] 或 [0, 1])
    - `relax_top_n`: 你想弛豫多少个能量最低的构型 (默认为 1)
-   - `touch_sphere_size`: 位点搜索的半径 (默认为 2.8)
+   - `touch_sphere_size`: 位点搜索的半径 (默认为 3)
    - `overlap_thr`: 放置吸附物时允许的最小重叠距离 (默认为 0.1)
    - `conformers_per_site_cap`: 每个位点最多保留多少个构象 (默认为 2)
 7.  **输出 JSON 对象。**
@@ -52,7 +52,7 @@ PLANNER_PROMPT = PromptTemplate(
     "surface_binding_atoms": [...],
     "adsorbate_binding_indices": [...],
     "relax_top_n": 1,
-    "touch_sphere_size": 2.8,
+    "touch_sphere_size": 3,
     "overlap_thr": 0.1,
     "conformers_per_site_cap": 2
   }}
