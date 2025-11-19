@@ -21,6 +21,7 @@ PLANNER_PROMPT = PromptTemplate(
 2. **制定新方案:** 你的目标是找到吸附能最低的构型。
    - 若 {history} 是 "无"，则提出最好的初始方案（例如，对于 CO，通常是 O-ontop）。
    - 若 {history} 中*已存在方案*（无论成败与否），你都**必须**提出一个与 {history} 中*所有*方案都不同的全新方案 (例: 若 'O-ontop' 成功了，能量为 -1.5 eV，你现在必须测试 'O-bridge' 或 'O-hollow' 来寻找能量更低的构型)。
+   - **收敛终止规则:** 如果你发现多个不同的初始位点经弛豫后最终都收敛到了**相同或极其相近**的吸附能（误差 < 0.05 eV）和构型，这意味着全局最优很可能已经找到。此时，**不要**为了“不同”而编造不合理的方案（如错误的吸附物类型）。请直接输出终止指令。
    - **注意:** 整个流程将在 {MAX_RETRIES} 次尝试后自动停止。你必须在 {MAX_RETRIES} 次尝试内系统性地探索所有可能的最佳方案。
 3. **分析请求:** 用户的核心意图是什么？(例: *特定原子* 以 *特定朝向* 吸附在 *特定位点*)
 4. **分析吸附物 (SMILES: {smiles}):**
@@ -48,6 +49,7 @@ PLANNER_PROMPT = PromptTemplate(
   "reasoning": "你的详细推理过程...",
   "adsorbate_type": "Molecule" 或 "ReactiveSpecies",
   "solution": {{
+    "action": "continue" 或 "terminate",
     "site_type": "...",
     "surface_binding_atoms": [...],
     "adsorbate_binding_indices": [...],

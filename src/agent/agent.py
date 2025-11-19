@@ -92,6 +92,8 @@ def make_plan_key(plan_json: Optional[dict]) -> Optional[str]:
         site_type = solution.get("site_type", "") or ""
         surf_atoms = solution.get("surface_binding_atoms", []) or []
         ads_indices = solution.get("adsorbate_binding_indices", []) or []
+        touch_sphere = solution.get("touch_sphere_size", 3)
+        ads_type = plan_json.get("adsorbate_type", "Molecule")
 
         # 确保两者是 list，否则返回 None（不抛异常）
         if not isinstance(surf_atoms, list) or not isinstance(ads_indices, list):
@@ -101,7 +103,7 @@ def make_plan_key(plan_json: Optional[dict]) -> Optional[str]:
         surf_atoms_str = ",".join(sorted(str(s) for s in surf_atoms))
         ads_indices_str = ",".join(str(i) for i in sorted(ads_indices))
 
-        key = f"{site_type}|{surf_atoms_str}|{ads_indices_str}"
+        key = f"{site_type}|{surf_atoms_str}|{ads_indices_str}|{ads_type}|{touch_sphere}"
         return key
     except Exception as e:
         print(f"--- ⚠️ make_plan_key 失败: {e} ---")
@@ -224,15 +226,18 @@ def plan_validator_node(state: AgentState) -> dict:
         print(f"--- Validation Failed: {error} ---")
         return {"validation_error": error}
 
-    plan = plan_json.get("solution", {})
-    if not plan:
+    solution = plan_json.get("solution", {})
+    if not solution:
         error = "False, Plan JSON missing or malformed ('solution' key is empty)."
         print(f"--- Validation Failed: {error} ---")
         return {"validation_error": error}
+    if solution.get("action") == "terminate":
+        print("--- 🛑 Planner 决定主动终止任务 (收敛或无更多方案) ---")
+        return {"validation_error": None}  # 直接通过，不再检查 site_type 等细节
 
-    site_type = plan.get("site_type", "")
-    surf_atoms = plan.get("surface_binding_atoms", [])
-    ads_indices = plan.get("adsorbate_binding_indices", [])
+    site_type = solution.get("site_type", "")
+    surf_atoms = solution.get("surface_binding_atoms", [])
+    ads_indices = solution.get("adsorbate_binding_indices", [])
     if site_type == "ontop" and len(ads_indices) != 1:
         error = f"False, Rule 2: Python check failed. site_type 'ontop' 必须与 1 个索引 (end-on) 配对，但提供了 {len(ads_indices)} 个。"
         print(f"--- Validation Failed: {error} ---")
@@ -590,6 +595,14 @@ def route_after_validation(state: AgentState) -> str:
     if state.get("validation_error"):
         print(f"--- 决策: 方案失败，返回规划 ---")
         return "planner"
+    
+    # 路由逻辑
+    plan_json = state.get("plan", {})
+    solution = plan_json.get("solution", {})
+    if solution.get("action") == "terminate":
+        print(f"--- 决策: Planner 请求终止，前往最终分析报告 ---")
+        return "final_analyzer"  # 跳过 Tool Executor，直接去写报告
+    
     else:
         print(f"--- 决策: 方案通过，前往执行 ---")
         return "tool_executor"
