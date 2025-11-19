@@ -73,6 +73,129 @@ print("--- 🩹 应用 Autoadsorbate 死循环热修复 (Monkey Patch) ... ---")
 autoadsorbate.Surf.get_shrinkwrap_grid = get_shrinkwrap_grid_fixed
 print("--- ✅ 修复已应用。Surf.get_shrinkwrap_grid 已被安全替换。 ---")
 
+def get_shrinkwrap_ads_sites_fixed(
+    atoms: Atoms,
+    precision: float = 0.25,  # 默认精度从 0.5 提升到 0.25
+    touch_sphere_size: float = 3,
+    return_trj: bool = False,
+    return_geometry = False
+):
+    import numpy as np
+    import itertools
+    from ase import Atom
+    # 引用原库中的辅助函数
+    from autoadsorbate.Surf import (
+        get_shrinkwrap_grid, # 注意：这会自动使用我们刚才Patch过的Fixed版本
+        shrinkwrap_surface, 
+        get_list_of_touching, 
+        get_wrapped_site,
+        get_shrinkwrap_site_n_vector,
+        get_shrinkwrap_site_h_vector
+    )
+
+    # 1. 获取网格
+    grid, faces = get_shrinkwrap_grid(
+        atoms, precision=precision, touch_sphere_size=touch_sphere_size
+    )
+    
+    # 2. 获取表面原子索引
+    surf_ind = shrinkwrap_surface(
+        atoms, precision=precision, touch_sphere_size=touch_sphere_size
+    )
+    
+    # 3. 识别接触点时，将 epsilon 从 0.1 提升到 0.3
+    # 这允许网格点即使稍微偏离中心，也能正确“抓”住周围的所有原子
+    targets = get_list_of_touching(atoms, grid, surf_ind, touch_sphere_size=touch_sphere_size, epsilon=0.3)
+
+    # 以下逻辑与原函数保持一致，用于计算向量和拓扑
+    trj = []
+    coordinates = []
+    connectivity = []
+    topology = []
+    n_vector = []
+    h_vector = []
+    site_formula = []
+
+    for target in targets:
+        atoms_copy = atoms.copy()
+
+        for index in target:
+            atoms_copy.append(Atom("X", atoms_copy[index].position + [0, 0, 0]))
+
+        extended_atoms = atoms_copy.copy() * [2, 2, 1]
+        extended_grid = grid.copy() * [2, 2, 1]
+
+        if len(target) == 1:
+            site_atoms = atoms_copy[target]
+            site_coord = site_atoms.positions[0]
+
+        else:
+            combs = []
+            min_std_devs = []
+
+            # 寻找几何中心
+            for c in itertools.combinations(
+                [atom.index for atom in extended_atoms if atom.symbol == "X"],
+                len(target),
+            ):
+                c = list(c)
+                min_std_devs.append(max(extended_atoms.positions[c].std(axis=0)))
+                combs.append(c)
+
+            min_std_devs = np.array(min_std_devs)
+            min_comb_index = np.argmin(min_std_devs)
+
+            site_atoms = extended_atoms[combs[min_comb_index]]
+            site_coord = np.mean(site_atoms.positions, axis=0)
+            site_coord = get_wrapped_site(site_coord, atoms_copy)
+            site_coord = np.array(site_coord)
+
+        n_vec = get_shrinkwrap_site_n_vector(
+            extended_atoms, site_coord, extended_grid, touch_sphere_size
+        )
+        h_vec = get_shrinkwrap_site_h_vector(site_atoms, n_vec)
+        site_form = atoms[target].symbols.formula.count()
+
+        coordinates.append(site_coord)
+        n_vector.append(n_vec)
+        h_vector.append(h_vec)
+        topology.append(target)
+        connectivity.append(len(target))
+        site_formula.append(site_form)
+
+    sites_dict = {
+        "coordinates": coordinates,
+        "connectivity": connectivity,
+        "topology": topology,
+        "n_vector": n_vector,
+        "h_vector": h_vector,
+        "site_formula": site_formula,
+    }
+
+    if return_trj:
+        extended_atoms = extended_atoms[
+            [
+                atom.index
+                for atom in extended_atoms
+                if np.linalg.norm(atom.position - site_coord) < 7
+            ]
+        ]
+        for m in range(20):
+            extended_atoms.append(Atom("H", site_coord + n_vec * m * 0.5))
+        trj.append(extended_atoms)
+        return sites_dict, trj
+    
+    if return_geometry:
+        return grid.positions, faces, sites_dict
+
+    return sites_dict
+
+# 应用补丁 2
+print("--- 🩹 应用 Autoadsorbate 位点分类精度修复 (Monkey Patch 2) ... ---")
+autoadsorbate.Surf.get_shrinkwrap_ads_sites = get_shrinkwrap_ads_sites_fixed
+print("--- ✅ 修复已应用。Surf.get_shrinkwrap_ads_sites 已被安全替换 (epsilon=0.3, prec=0.25)。 ---")
+# ================= Monkey Patch Fix 2 End =================
+
 from collections import Counter
 import ase
 from ase.io import read, write
