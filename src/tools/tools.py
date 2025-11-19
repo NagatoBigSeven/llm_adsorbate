@@ -1,3 +1,79 @@
+import numpy as np
+from ase import Atoms
+from scipy.spatial.distance import cdist
+import autoadsorbate.Surf 
+# 确保先导入原模块，以便我们覆盖它
+
+# 修复 Autoadsorbate 库中 get_shrinkwrap_grid 函数的死循环 Bug
+# 该修复通过添加 Z 轴下限检查，防止网格点从表面空隙中无限掉落
+def get_shrinkwrap_grid_fixed(
+    slab,
+    precision,
+    drop_increment=0.1,
+    touch_sphere_size=3,
+    marker="He",
+    raster_speed_boost=False,
+):
+    # 引入必要的依赖 (原函数内部引用的依赖)
+    from autoadsorbate.Surf import _get_starting_grid, get_large_atoms
+    
+    # 处理 raster_speed_boost
+    if raster_speed_boost:
+        from autoadsorbate.raster_utilities import get_surface_from_rasterized_top_view
+        raster_surf_index = get_surface_from_rasterized_top_view(
+            slab, pixel_per_angstrom=10
+        )
+        slab = slab[raster_surf_index]
+
+    # 获取初始网格
+    starting_grid, faces = _get_starting_grid(slab, precision=precision)
+    grid_positions = starting_grid.positions
+    large_slab = get_large_atoms(slab)
+    slab_positions = large_slab.positions
+
+    distances_to_grid = cdist(grid_positions, slab_positions).min(axis=1)
+    drop_vectors = np.array([[0, 0, drop_increment] for _ in grid_positions])
+
+    # 原代码: while (distances_to_grid > touch_sphere_size).any():
+    # 修改后: 增加 (grid_positions[:, 2] > -1.0) 条件
+    # 只有当点离表面远 且 Z坐标大于 -1.0 时才继续移动。
+    # 一旦掉到 -1.0 以下，就视为“穿透”并停止移动，防止死循环。
+    while ((distances_to_grid > touch_sphere_size) & (grid_positions[:, 2] > -1.0)).any():
+        
+        # 计算需要移动的点的掩码
+        mask_to_move = (distances_to_grid > touch_sphere_size) & (grid_positions[:, 2] > -1.0)
+        
+        # 只更新这些点的位置
+        grid_positions -= (
+            drop_vectors * mask_to_move[:, np.newaxis]
+        )
+        
+        # 重新计算距离
+        distances_to_grid = cdist(grid_positions, slab_positions).min(axis=1)
+
+        # 保留原有的退出条件作为双重保险
+        if (distances_to_grid > touch_sphere_size).all() and (
+            grid_positions[:, 2] <= 0
+        ).all():
+            break
+
+    grid = Atoms(
+        [marker for _ in grid_positions],
+        grid_positions,
+        pbc=[True, True, True],
+        cell=slab.cell,
+    )
+    # 过滤掉掉到 Z=0 以下的点（即穿透表面的点），只保留挂在表面上的点
+    grid = grid[[atom.index for atom in grid if atom.position[2] > 0]]
+
+    return grid, faces
+
+# 应用补丁：用我们的修复版函数替换掉库中的原函数
+print("--- 🩹 应用 Autoadsorbate 死循环热修复 (Monkey Patch) ... ---")
+autoadsorbate.Surf.get_shrinkwrap_grid = get_shrinkwrap_grid_fixed
+print("--- ✅ 修复已应用。Surf.get_shrinkwrap_grid 已被安全替换。 ---")
+
+from collections import Counter
 import ase
 from ase.io import read, write
 from autoadsorbate import Surface, Fragment
@@ -11,11 +87,9 @@ import os
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from ase.neighborlist import build_neighbor_list, natural_cutoffs
 from scipy.sparse.csgraph import connected_components
-import numpy as np
 import json
 from rdkit import Chem
 from rdkit.Chem import AllChem
-from ase import Atoms
 from typing import Union, Tuple
 
 def get_atom_index_menu(original_smiles: str) -> str:
@@ -78,6 +152,13 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
         
         # 5. 调整电荷 (基于价电子数，区分共价键和配位键)
         target_atom_obj = new_mol.GetAtomWithIdx(idx_map[target_idx])
+
+        # FIX: RDKit 可能会在 AddHs 或 Embed 过程中吞掉显式的 [H] 原子。
+        # 强制将其设为同位素 2 (氘)，RDKit 会将其视为重原子保留，
+        # 而 ASE 转换时 symbol 依然是 'H'，物理上无影响。
+        if target_atom_obj.GetSymbol() == 'H':
+            print(f"--- 🔬 检测到 H 原子吸附，应用同位素标记 [2H] 以防止 RDKit 吞噬... ---")
+            target_atom_obj.SetIsotope(2)
 
         # 从 RDKit 获取化学原理
         atomic_num = target_atom_obj.GetAtomicNum()
@@ -503,15 +584,30 @@ def populate_surface_with_fragment(
     # --- 3. 可选的表面原子过滤 ---
     allowed_symbols = plan_solution.get("surface_binding_atoms")
     if allowed_symbols and len(allowed_symbols) > 0:
-        print(f"--- 🛠️ 正在按表面符号过滤: {allowed_symbols} ---")
+        # 使用排序后的字符串做日志，清晰明了
+        print(f"--- 🛠️ 正在按表面符号过滤 (严格匹配): {sorted(allowed_symbols)} ---")
+        
+        # 预先计算目标的原子计数 (例如: {'Mo': 2, 'Pd': 1})
+        target_counts = Counter(allowed_symbols)
         
         def check_symbols(site_formula_dict):
             if not site_formula_dict or not isinstance(site_formula_dict, dict):
                 return False
-            # 检查此位点的 *任何* 原子是否在允许列表中
-            return any(symbol in allowed_symbols for symbol in site_formula_dict.keys())
+            
+            # 严格匹配逻辑：
+            # 将 site_formula_dict (例如 {'Mo': 2, 'Pd': 1}) 展开并计数，必须与目标完全一致
+            # 防止请求 ['Mo', 'Mo'] (纯桥位) 却返回 {'Mo': 2, 'Pd': 1} (混合空位) 的情况
+            
+            # 1. 展开位点成分 (dict -> list)
+            site_atoms_list = []
+            for sym, count in site_formula_dict.items():
+                site_atoms_list.extend([sym] * count)
+            
+            # 2. 比较计数器
+            return Counter(site_atoms_list) == target_counts
 
         initial_count = len(site_df_filtered)
+        # 应用严格过滤器
         site_df_filtered = site_df_filtered[
             site_df_filtered['site_formula'].apply(check_symbols)
         ]
@@ -1029,10 +1125,22 @@ def analyze_relaxation_results(
              return json.dumps({"status": "error", "message": f"分析失败：不支持的键合索引数量 {num_binding_indices}。"})
 
         # 6. 保存最终结构
-        best_atoms_filename = f"outputs/BEST_{original_smiles.replace('=','_').replace('#','_')}_on_surface.xyz"
+        # 防止文件名冲突导致覆盖历史最优解。
+        # 在文件名中加入：位点类型、表面原子组成、能量。
+        
+        # 提取位点信息用于文件名
+        site_type_str = plan_solution.get('site_type', 'unknown')
+        binding_atoms_str = "-".join(sorted(plan_solution.get('surface_binding_atoms', [])))
+        
+        # 构建唯一文件名 (例如: BEST_[H]_hollow_Mo-Mo-Pd_E-2.638.xyz)
+        # 替换掉文件名中可能导致问题的字符
+        clean_smiles = original_smiles.replace('=', '_').replace('#', '_').replace('[', '').replace(']', '')
+        best_atoms_filename = f"outputs/BEST_{clean_smiles}_{site_type_str}_{binding_atoms_str}_E{E_ads:.3f}.xyz"
+        
         try:
             write(best_atoms_filename, relaxed_atoms)
             print(f"--- 🛠️ 成功将最佳结构保存到 {best_atoms_filename} ---")
+            # 将具体的文件名返回给 Agent，方便它在报告中引用
             result["best_structure_file"] = best_atoms_filename
         except Exception as e:
             print(f"--- 🛠️ 错误: 无法保存最佳结构到 {best_atoms_filename}: {e} ---")
