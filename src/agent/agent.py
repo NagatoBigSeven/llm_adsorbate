@@ -389,16 +389,18 @@ def tool_executor_node(state: AgentState) -> dict:
             
             print(f"--- 🛠️ 正在弛豫孤立的 {state['smiles']} 分子... ---")
 
-            # *** 应用 *一致* 的弛豫协议 ***
-            
-            # 协议 1: MD 预热 (与 relax_atoms 一致)
-            if md_steps > 0:
-                MaxwellBoltzmannDistribution(adsorbate_only_atoms, temperature_K=md_temp)
-                dyn_md_ads = Langevin(adsorbate_only_atoms, 1 * units.fs, temperature_K=md_temp, friction=0.01)
-                dyn_md_ads.run(md_steps)
-                
-            # 协议 2: BFGS 优化 (与 relax_atoms 一致)
-            BFGS(adsorbate_only_atoms, trajectory=None, logfile=None).run(fmax=opt_fmax, steps=opt_steps)
+            # 检测单原子分子。单原子在真空中没有内部自由度，势能面平坦，导致 BFGS 算法因力变化为0而除以零崩溃。
+            if len(adsorbate_only_atoms) > 1:
+                # 协议 1: MD 预热 (与 relax_atoms 一致)
+                if md_steps > 0:
+                    MaxwellBoltzmannDistribution(adsorbate_only_atoms, temperature_K=md_temp)
+                    dyn_md_ads = Langevin(adsorbate_only_atoms, 1 * units.fs, temperature_K=md_temp, friction=0.01)
+                    dyn_md_ads.run(md_steps)
+                    
+                # 协议 2: BFGS 优化 (与 relax_atoms 一致)
+                BFGS(adsorbate_only_atoms, trajectory=None, logfile=None).run(fmax=opt_fmax, steps=opt_steps)
+            else:
+                print(f"--- 🛠️ 检测到单原子吸附物 ({len(adsorbate_only_atoms)} atom)，跳过真空弛豫（物理上无需优化）。 ---")
             
             E_adsorbate = adsorbate_only_atoms.get_potential_energy()
             tool_logs.append(f"Success: E_adsorbate = {E_adsorbate:.4f} eV.")
