@@ -870,24 +870,54 @@ def analyze_relaxation_results(
 
             print(f"--- 分析: (1-index 模式) 正在检查第一个吸附物原子, 符号: '{target_atom_symbol}', 全局索引: {target_atom_global_index}。---")
 
-            # 4. 计算该原子与表面的最近距离
-            distances = np.linalg.norm(slab_atoms_relaxed.positions - target_atom_pos, axis=1)
-            min_distance = np.min(distances)
-            nearest_slab_atom_global_index = slab_indices[np.argmin(distances)]
-            nearest_slab_atom_symbol = relaxed_atoms[nearest_slab_atom_global_index].symbol
-
-            # 5. 估计键合
-            radius_1 = cov_cutoffs[target_atom_global_index]
-            radius_2 = cov_cutoffs[nearest_slab_atom_global_index]
-            bonding_cutoff = (radius_1 + radius_2) * 1.1 # 1.1 的容差
-            is_bound = min_distance <= bonding_cutoff
+            # --- 寻找所有成键的表面原子，而不仅仅是最近的一个 ---
+            bonded_surface_atoms = []
+            min_distance = float('inf')
+            nearest_slab_atom_symbol = ""
+            nearest_slab_atom_global_index = -1
+            
+            # 遍历所有表面原子计算距离
+            for s_idx in slab_indices:
+                # 使用 MIC (最小镜像约定) 计算距离，确保周期性边界下距离正确
+                d = relaxed_atoms.get_distance(target_atom_global_index, s_idx, mic=True)
+                
+                # 更新最近原子记录 (作为备用信息)
+                if d < min_distance:
+                    min_distance = d
+                    nearest_slab_atom_global_index = s_idx
+                    nearest_slab_atom_symbol = relaxed_atoms[s_idx].symbol
+                
+                # 检查是否成键
+                r_ads = cov_cutoffs[target_atom_global_index]
+                r_slab = cov_cutoffs[s_idx]
+                bonding_cutoff = (r_ads + r_slab) * 1.1 
+                
+                if d <= bonding_cutoff:
+                    bonded_surface_atoms.append({
+                        "symbol": relaxed_atoms[s_idx].symbol,
+                        "index": s_idx,
+                        "distance": round(d, 3)
+                    })
+            
+            # 按距离排序，让最近的排前面
+            bonded_surface_atoms.sort(key=lambda x: x["distance"])
+            
+            is_bound = len(bonded_surface_atoms) > 0
+            
+            # 生成成键描述字符串 (例如: "Cu-2.01Å, Ga-2.15Å")
+            if is_bound:
+                bonded_desc = ", ".join([f"{item['symbol']}-{item['distance']}Å" for item in bonded_surface_atoms])
+            else:
+                bonded_desc = "无"
+            
+            # 估算最近原子的 cutoff 用于报告
+            nearest_radius_sum = cov_cutoffs[target_atom_global_index] + cov_cutoffs[nearest_slab_atom_global_index]
+            estimated_covalent_cutoff_A = nearest_radius_sum * 1.1
 
             analysis_message = (
                 f"最稳定构型吸附能: {E_ads:.4f} eV。"
                 f"目标吸附物原子: {target_atom_symbol} (来自规划索引 {binding_atom_indices[0]}，在弛豫结构中为全局索引 {target_atom_global_index})。 "
-                f"最近的表面原子: {nearest_slab_atom_symbol} (Index {nearest_slab_atom_global_index})。 "
-                f"最终距离: {round(min_distance, 3)} Å。"
-                f"估计共价键阈值: {round(bonding_cutoff, 3)} Å。"
+                f"成键表面原子: {bonded_desc} (最近原子: {nearest_slab_atom_symbol}, 距离: {round(min_distance, 3)} Å)。 "
                 f"是否成键: {is_bound}。"
                 f"是否发生反应性转变: {reaction_detected} (键变化数: {bond_change_count} )。"
             )
@@ -898,10 +928,11 @@ def analyze_relaxation_results(
                 "most_stable_energy_eV": E_ads,
                 "target_adsorbate_atom": target_atom_symbol,
                 "target_adsorbate_atom_index": int(target_atom_global_index),
+                "bonded_surface_atoms": bonded_surface_atoms, # [新增] 包含所有成键原子的列表
                 "nearest_slab_atom": nearest_slab_atom_symbol,
                 "nearest_slab_atom_index": int(nearest_slab_atom_global_index),
                 "final_bond_distance_A": round(min_distance, 3),
-                "estimated_covalent_cutoff_A": round(bonding_cutoff, 3),
+                "estimated_covalent_cutoff_A": round(estimated_covalent_cutoff_A, 3),
                 "is_covalently_bound": bool(is_bound),
                 "reaction_detected": bool(reaction_detected),
                 "is_dissociated": bool(is_dissociated),

@@ -527,7 +527,7 @@ def final_analyzer_node(state: AgentState) -> dict:
 
     if status_flag == "success":
         final_prompt = """
-        你是一名计算化学专家。
+        你是一名专攻异相催化和表面科学的计算化学专家。
         你的规划和计算任务已成功执行，并且自动化分析工具已返回了 *基于事实* 的数据。
 
         **你的原始规划 (你当初的意图):**
@@ -540,7 +540,7 @@ def final_analyzer_node(state: AgentState) -> dict:
         1.  **解读数据:** 查看 `analysis_json`。`is_covalently_bound` 是 True 还是 False？`most_stable_energy_eV` 和 `final_bond_distance_A` 是多少？
         2.  **回答请求:** 根据这个 *真实数据*（而不是猜测），回答用户的原始请求：
             '{user_request}'
-        3.  **提供关键信息:** 报告最稳定的能量、键长和保存的最佳结构文件名 (`best_structure_file`)。
+        3.  **提供关键信息:** 报告最稳定的能量、所有成键原子及键长（查看 `bonded_surface_atoms` 字段，如有多个成键原子，请全部列出）。
         4.  **禁止幻觉:** 你的报告必须 100% 建立在上述 JSON 数据的客观事实上。
         """
         prompt = final_prompt.format(
