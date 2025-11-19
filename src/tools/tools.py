@@ -9,7 +9,8 @@ from ase.md.langevin import Langevin
 from ase import units
 import os
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
-from ase.neighborlist import natural_cutoffs
+from ase.neighborlist import build_neighbor_list, natural_cutoffs
+from scipy.sparse.csgraph import connected_components
 import numpy as np
 import json
 from rdkit import Chem
@@ -599,6 +600,15 @@ def relax_atoms(
             atoms.calc = calculator
             atoms.set_constraint(constraint)
             
+            # 先计算一次静态力，防止 MD 或 BFGS 因为力太大直接崩掉
+            forces = atoms.get_forces()
+            max_force = np.linalg.norm(forces, axis=1).max()
+            
+            # 阈值设为 50 eV/A (这是一个非常巨大的力，正常分子不应超过此值)
+            if max_force > 50.0:
+                print(f"--- ⚠️ 跳过结构 {i+1}: 初始力过大 (Max Force = {max_force:.2f} eV/A)，结构极不稳定。 ---")
+                continue
+
             if md_steps > 0:
                 MaxwellBoltzmannDistribution(atoms, temperature_K=md_temp)
                 dyn_md = Langevin(atoms, 1 * units.fs, temperature_K=md_temp, friction=0.01)
@@ -759,9 +769,35 @@ def analyze_relaxation_results(
         E_ads = min_energy_total - e_surface_ref - e_adsorbate_ref
         print(f"--- Analysis: E_ads = {E_ads:.4f} eV (E_total = {min_energy_total:.4f} eV, E_surf={e_surface_ref:.4f}, E_ads_mol={e_adsorbate_ref:.4f}) ---")
         
-        # --- 提取新添加的键变化信息 ---
+        # 1. 提取吸附物原子
+        adsorbate_atoms = relaxed_atoms[len(slab_atoms):]
+
+        # 2. 复制并应用 PBC 信息 (关键！防止跨边界原子被误判为断裂)
+        # 我们创建一个临时的 Atoms 对象来进行拓扑分析
+        check_atoms = adsorbate_atoms.copy()
+        check_atoms.set_cell(relaxed_atoms.get_cell())
+        check_atoms.set_pbc(relaxed_atoms.get_pbc())
+
+        # 3. 构建邻接矩阵 (考虑 PBC)
+        # mult=1.2 给键长一点裕度 (C-H ~1.1A -> cutoff ~1.3A)
+        # 如果距离超过这个范围，那就是真的断了
+        check_cutoffs = natural_cutoffs(check_atoms, mult=1.2)
+        nl = build_neighbor_list(check_atoms, cutoffs=check_cutoffs, self_interaction=False)
+        adjacency_matrix = nl.get_connectivity_matrix()
+
+        # 4. 计算连通分量 (数一数分子碎成了几块)
+        n_components, labels = connected_components(adjacency_matrix, directed=False)
+
+        # 5. 判定逻辑
+        # 正常情况下，单分子吸附应该只有 1 个连通分量
+        is_dissociated = n_components > 1
+
+        # 6. 获取键变化计数 (作为辅助参考)
         bond_change_count = relaxed_atoms.info.get("bond_change_count", -1) # -1 表示检查失败
-        reaction_detected = bond_change_count > 0
+
+        # 7. 综合判定反应性
+        # 只要分子碎了(is_dissociated) 或者 键变了(bond_change_count > 0)，都算发生了反应
+        reaction_detected = is_dissociated or (bond_change_count > 0)
 
         # --- 从 plan_dict 检索信息 ---
         plan_solution = plan_dict.get("solution", {})
@@ -868,6 +904,8 @@ def analyze_relaxation_results(
                 "estimated_covalent_cutoff_A": round(bonding_cutoff, 3),
                 "is_covalently_bound": bool(is_bound),
                 "reaction_detected": bool(reaction_detected),
+                "is_dissociated": bool(is_dissociated),
+                "n_components": int(n_components),
                 "bond_change_count": int(bond_change_count),
                 "site_analysis": {
                     "planned_site_type": planned_site_type,
@@ -946,6 +984,8 @@ def analyze_relaxation_results(
                 },
                 "reaction_detected": bool(reaction_detected),
                 "bond_change_count": int(bond_change_count),
+                "is_dissociated": bool(is_dissociated),
+                "n_components": int(n_components),
                 "site_analysis": {
                     "planned_site_type": planned_site_type,
                     "planned_connectivity": planned_connectivity,
