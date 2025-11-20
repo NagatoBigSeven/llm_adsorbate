@@ -444,9 +444,21 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
                     raise ValueError(f"RDKit 未能为 {SMILES} 生成构象。")
              conf_ids = [0]
         
-        # 优化生成的构象
+        # === 在 UFF 优化前清除电荷 ===
+        # 创建一个用于优化的临时分子副本
+        mol_for_opt = Chem.Mol(mol_with_hs)
+        for atom in mol_for_opt.GetAtoms():
+            if atom.GetFormalCharge() != 0:
+                atom.SetFormalCharge(0) # 强制中性化，以便 UFF 识别原子类型
+
+        # 尝试优化这个“干净”的分子
         try:
-            AllChem.UFFOptimizeMoleculeConfs(mol_with_hs)
+            AllChem.UFFOptimizeMoleculeConfs(mol_for_opt)
+            # 将优化后的坐标倒回原分子 (带有映射信息的分子)
+            for i in range(len(conf_ids)):
+                conf_src = mol_for_opt.GetConformer(conf_ids[i])
+                conf_dst = mol_with_hs.GetConformer(conf_ids[i])
+                conf_dst.SetPositions(conf_src.GetPositions())
         except Exception as e:
             # UFFTYPER 警告会在这里被捕获。我们忽略它们并继续。
             print(f"--- 🛠️ _get_fragment: 警告: UFF 优化失败或发出警告 ({e})。使用未优化的构象。 ---")
@@ -646,6 +658,40 @@ def create_fragment_from_plan(
     print(f"--- 🛠️ create_fragment_from_plan: 成功创建并标记了 Fragment 对象。 ---")
     return fragment
 
+def _bump_adsorbate_to_safe_distance(slab_atoms: ase.Atoms, full_atoms: ase.Atoms, min_dist_threshold: float = 1.5) -> ase.Atoms:
+    """
+    检查吸附物是否与表面发生碰撞。如果有，沿 Z 轴向上推，直到没有碰撞。
+    """
+    # 1. 区分表面和吸附物
+    n_slab = len(slab_atoms)
+    adsorbate_indices = list(range(n_slab, len(full_atoms)))
+    
+    if not adsorbate_indices:
+        return full_atoms
+
+    # 2. 提取位置
+    slab_pos = full_atoms.positions[:n_slab]
+    ads_pos = full_atoms.positions[n_slab:]
+    
+    # 3. 计算距离矩阵 (Adsorbate vs Slab)
+    # 注意：对于非常大的体系，可以使用 NeighborList，但这里直接计算 cdist 够快且稳健
+    dists = cdist(ads_pos, slab_pos)
+    min_d = np.min(dists)
+    
+    # 4. 如果太近，计算需要抬升多少
+    if min_d < min_dist_threshold:
+        # 我们希望 min_d 至少是 min_dist_threshold
+        # 简单的策略：逐步抬升，或者直接一次性抬升 (threshold - min_d) + buffer
+        # 考虑到几何形状复杂，直接加 Z 是最安全的
+        bump_height = (min_dist_threshold - min_d) + 0.2 # 额外加 0.2 A 缓冲
+        
+        print(f"--- 🛡️ 碰撞检测: 发现原子重叠 (min_dist={min_d:.2f} Å < {min_dist_threshold} Å)。正在抬升 {bump_height:.2f} Å... ---")
+        
+        # 修改吸附物坐标
+        full_atoms.positions[adsorbate_indices, 2] += bump_height
+    
+    return full_atoms
+
 def populate_surface_with_fragment(
     slab_atoms: ase.Atoms, 
     fragment_object: Fragment,
@@ -755,7 +801,7 @@ def populate_surface_with_fragment(
     # --- 5. 调用库 ---
     print(f"--- 🛠️ 正在调用 s.get_populated_sites (cap={conformers_per_site_cap}, overlap={overlap_thr})... ---")
     
-    out_trj = s.get_populated_sites(
+    raw_out_trj = s.get_populated_sites(
       fragment=fragment_object,
       site_index=site_index_arg,
       sample_rotation=sample_rotation,
@@ -765,6 +811,15 @@ def populate_surface_with_fragment(
       verbose=True
     )
     
+    # === 对生成的构型进行碰撞检测和抬升 ===
+    safe_out_trj = []
+    for idx, atoms in enumerate(raw_out_trj):
+        # 使用 1.3 Å 作为硬性防爆阈值 (共价键通常 > 1.4 Å，小于 1.3 几乎肯定是排斥区)
+        safe_atoms = _bump_adsorbate_to_safe_distance(slab_atoms, atoms, min_dist_threshold=1.3)
+        safe_out_trj.append(safe_atoms)
+    
+    out_trj = safe_out_trj
+
     print(f"--- 🛠️ 成功生成了 {len(out_trj)} 个初始构型。 ---")
     
     if not out_trj:
