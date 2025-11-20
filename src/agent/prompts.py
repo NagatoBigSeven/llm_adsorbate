@@ -9,6 +9,7 @@ PLANNER_PROMPT = PromptTemplate(
 - SMILES: {smiles}
 - 表面文件路径: {slab_xyz_path}
 - 表面文件内容: {surface_composition}
+- 表面位点清单: {available_sites_description}
 - 用户请求: {user_request}
 
 **--- 历史记录开始 (之前所有成功和失败的方案) ---**
@@ -31,7 +32,7 @@ PLANNER_PROMPT = PromptTemplate(
    - **你的任务:** 严格*参考*上面的索引列表，在步骤 6 中选择正确的 `adsorbate_binding_indices`。
    - *示例 (CCO - 乙醇)*: 如果索引列表是 `[{{\"index\": 0, \"symbol\": \"C\"}}, {{\"index\": 1, \"symbol\": \"C\"}}, {{\"index\": 2, \"symbol\": \"O\"}}]`，而你想通过 O 吸附，你必须选择 [2]。
    - **警告:** 严禁*猜测*索引，必须使用上面提供的索引列表。如果索引不匹配，你的规划必然失败。
-5. **分析表面:** 从 `{slab_xyz_path}` 和 `{surface_composition}` 推测表面类型 (例: Cu(211) 或 NiFeO) 和主要元素组成 (例: Cu 或 Fe、Ni 和 O)，忽略 `surface_composition` 中的原子坐标，仅关注元素符号。
+5. **分析表面:** 参考 {available_sites_description}，只规划存在的位点组合。
 6. **制定方案:**
    - `site_type`: 选择位点 (ontop / bridge / hollow)
    - `surface_binding_atoms`: 位点参与成键的表面原子 (例: ["Cu"] 或 ["Ni", "Fe", O""] )
@@ -120,5 +121,5 @@ PLANNER_PROMPT = PromptTemplate(
     }}
 **--- 示例2结束 ---**
 """,
-    input_variables=["smiles", "slab_xyz_path", "surface_composition", "user_request", "history", "MAX_RETRIES"]
+    input_variables=["smiles", "slab_xyz_path", "surface_composition", "available_sites_description", "user_request", "history", "MAX_RETRIES"]
 )

@@ -27,6 +27,7 @@ from src.tools.tools import (
     read_atoms_object,
     get_atom_index_menu,
     prepare_slab,
+    analyze_surface_sites,
     create_fragment_from_plan,
     populate_surface_with_fragment,
     relax_atoms, 
@@ -50,6 +51,7 @@ class AgentState(TypedDict):
     history: List[str]
     best_result: Optional[dict]
     attempted_keys: List[str]
+    available_sites_description: Optional[str]
 
 # --- 2. 设置环境和 LLM ---
 load_dotenv()
@@ -79,12 +81,6 @@ def get_llm():
     return llm
 
 def make_plan_key(plan_json: Optional[dict]) -> Optional[str]:
-    """
-    根据 plan 生成一个组合 key：
-    (site_type, sorted(surface_binding_atoms), sorted(adsorbate_binding_indices))
-
-    返回字符串，或者在信息不足时返回 None。
-    """
     if not plan_json or not isinstance(plan_json, dict):
         return None
     try:
@@ -99,9 +95,9 @@ def make_plan_key(plan_json: Optional[dict]) -> Optional[str]:
         if not isinstance(surf_atoms, list) or not isinstance(ads_indices, list):
             return None
 
-        # 统一转成字符串并排序，避免 ["Cu","Ni"] vs ["Ni","Cu"] 被当成不同
-        surf_atoms_str = ",".join(sorted(str(s) for s in surf_atoms))
-        ads_indices_str = ",".join(str(i) for i in sorted(ads_indices))
+        # 统一转成字符串，保留顺序以区分异核双点吸附的方向 (如 Mo-Pd vs Pd-Mo)
+        surf_atoms_str = ",".join(str(s) for s in surf_atoms)
+        ads_indices_str = ",".join(str(i) for i in ads_indices)
 
         key = f"{site_type}|{surf_atoms_str}|{ads_indices_str}|{ads_type}|{touch_sphere}"
         return key
@@ -111,27 +107,20 @@ def make_plan_key(plan_json: Optional[dict]) -> Optional[str]:
 
 # --- 3. 定义 LangGraph 节点 ---
 def pre_processor_node(state: AgentState) -> dict:
-    """
-    在规划前运行，读取Slab文件以提取表面成分。
-    """
     print("--- 🔬 调用 Pre-Processor 节点 ---")
     try:
-        slab_atoms = read(state["slab_path"])
-        # 获取所有原子的化学符号
-        symbols = slab_atoms.get_chemical_symbols()
-        # 获取唯一的化学符号列表, 按出现次数排序
-        # (例如 ['Cu', 'O'] 而不是 ['O', 'Cu'])
-        composition = [item[0] for item in Counter(symbols).most_common()]
-
-        print(f"--- 🔬 成功读取Slab。成分: {composition} ---")
-        return {"surface_composition": composition}
+        analysis = analyze_surface_sites(state["slab_path"])
+        return {
+            "surface_composition": analysis["surface_composition"],
+            "available_sites_description": analysis["available_sites_description"]
+        }
     except Exception as e:
-        error_message = f"False, 基础 Slab 文件 '{state['slab_path']}' 无法被 ASE 读取: {e}"
+        error_message = f"错误: 无法读取 Slab 文件 '{state['slab_path']}': {e}"
         print(f"--- 验证失败: {error_message} ---")
-        # 这是一个致命错误，我们设置 validation_error 来停止工作流
         return {
             "validation_error": error_message,
-            "surface_composition": None
+            "surface_composition": None,
+            "available_sites_description": None
         }
 
 def solution_planner_node(state: AgentState) -> dict:
@@ -156,7 +145,8 @@ def solution_planner_node(state: AgentState) -> dict:
         "user_request": state["user_request"],
         "history": "\n".join(state["history"]) if state.get("history") else "无",
         "MAX_RETRIES": MAX_RETRIES,
-        "autoadsorbate_context": atom_menu_json
+        "autoadsorbate_context": atom_menu_json,
+        "available_sites_description": state.get("available_sites_description", "无"),
     }
     
     if state.get("validation_error"):
@@ -312,6 +302,8 @@ def tool_executor_node(state: AgentState) -> dict:
     slab_path = state["slab_path"]
     tool_logs = []
     analysis_json = None
+
+    new_best = state.get("best_result") # 在此处初始化 new_best，确保无论是否报错它都有值
     
     try:
         # 1. 读取原始 Slab
@@ -454,6 +446,20 @@ def tool_executor_node(state: AgentState) -> dict:
         print(f"--- 🔬 分析结果: {analysis_json_str} ---")
         analysis_json = json.loads(analysis_json_str)
 
+        # 只要没解离，就算有效结果
+        if analysis_json.get("status") == "success" and not analysis_json.get("is_dissociated"):
+            e_new = analysis_json.get("most_stable_energy_eV")
+            e_old = new_best.get("most_stable_energy_eV", float('inf')) if new_best else float('inf')
+            
+            if isinstance(e_new, (int, float)) and e_new < e_old:
+                print(f"--- 🌟 发现新最优解: {e_new:.4f} eV ---")
+                new_best = {
+                    "most_stable_energy_eV": e_new,
+                    "analysis_json": analysis_json,
+                    "plan": state.get("plan"),
+                    "result_type": "Perfect" if analysis_json.get("bond_change_count")==0 else "Isomerized"
+                }
+
     except Exception as e:
         error_message = str(e)
         print(f"--- 🛑 工具执行失败: {error_message} ---")
@@ -462,133 +468,102 @@ def tool_executor_node(state: AgentState) -> dict:
         
     return {
         "messages": [ToolMessage(content="\n".join(tool_logs), tool_call_id="tool_executor")],
-        "analysis_json": json.dumps(analysis_json)
+        "analysis_json": json.dumps(analysis_json),
+        "best_result": new_best
     }
 
 def final_analyzer_node(state: AgentState) -> dict:
     """ 
     节点 5: Final Analyzer
-    极度严格的失败提示词，防止幻觉。
+    功能：基于全局最优结果生成报告，并区分完美吸附与分子内重排。
     """
     print("--- ✍️ 调用 Final Analyzer 节点 ---")
     llm = get_llm()
-    analysis_data = {}
+    
+    # 1. 提取数据源
+    best_result = state.get("best_result") 
+    last_analysis_json_str = state.get("analysis_json", "{}")
+    
     try:
-        analysis_json_str = state.get("analysis_json")
-        if not analysis_json_str:
-            analysis_data = {"status": "error", "message": "分析 JSON 丢失或为空。"}
-        else:
-            analysis_data = json.loads(analysis_json_str)
-    except json.JSONDecodeError as e:
-        print(f"--- 🛑 Final Analyzer: JSON 解析失败 {e} ---")
-        print(f"--- 原始字符串: {state.get('analysis_json')} ---")
-        analysis_data = {"status": "error", "message": f"Analysis JSON was corrupted: {e}"}
+        last_analysis = json.loads(last_analysis_json_str)
+    except:
+        last_analysis = {}
+
+    # 2. 决策：汇报哪个数据？
+    target_data = None
+    plan_used = None
+    source_type = "failure"
+    result_label = "Unknown" # 用于提示 LLM 结果类型
+
+    # 优先级 1: 历史最优
+    if best_result and isinstance(best_result, dict):
+        print(f"--- ✍️ Final Analyzer: 锁定全局最优方案 (E={best_result.get('most_stable_energy_eV')} eV) ---")
+        target_data = best_result.get("analysis_json")
+        plan_used = best_result.get("plan")
+        # 如果 route_after_analysis 保存了 result_type，则读取它
+        result_label = best_result.get("result_type", "Best History")
+        source_type = "success"
     
-    # --- 优先使用全局最优方案，如果存在的话 ---
-    best = state.get("best_result")
-    best_analysis = None
-    best_plan = None
-
-    if isinstance(best, dict):
-        _a = best.get("analysis_json")
-        if isinstance(_a, dict) and _a.get("status") == "success" and _a.get("is_covalently_bound", False):
-            best_analysis = _a
-            best_plan = best.get("plan")
-
-    # 如果有全局最优，就用它；否则退回最后一次 analysis_json
-    if best_analysis is not None:
-        print("--- ✍️ Final Analyzer: 使用全局最优方案生成报告 ---")
-        success_analysis = best_analysis
-        success_plan = best_plan or {}
-        analysis_json_for_prompt = json.dumps(success_analysis)
-        plan_str = json.dumps(success_plan)
-        status_flag = "success"
+    # 优先级 2: 最后一次尝试成功
+    elif last_analysis.get("status") == "success" and last_analysis.get("is_covalently_bound"):
+        print("--- ✍️ Final Analyzer: 无历史最优，使用最后一步的成功结果 ---")
+        target_data = last_analysis
+        plan_used = state.get("plan")
+        result_label = "Last Attempt"
+        source_type = "success"
+    
     else:
-        print("--- ✍️ Final Analyzer: 未找到全局最优方案，使用最后一次分析结果 ---")
-        analysis_data = {}
-        try:
-            analysis_json_str = state.get("analysis_json")
-            if not analysis_json_str:
-                analysis_data = {"status": "error", "message": "分析 JSON 丢失或为空。"}
-            else:
-                analysis_data = json.loads(analysis_json_str)
-        except json.JSONDecodeError as e:
-            print(f"--- 🛑 Final Analyzer: JSON 解析失败 {e} ---")
-            print(f"--- 原始字符串: {state.get('analysis_json')} ---")
-            analysis_data = {"status": "error", "message": f"Analysis JSON was corrupted: {e}"}
+        print("--- ✍️ Final Analyzer: 所有尝试均失败 ---")
+        source_type = "failure"
 
-        if analysis_data.get("status") == "success" and analysis_data.get("is_covalently_bound", False):
-            success_analysis = analysis_data
-            success_plan = state.get("plan", {})
-            analysis_json_for_prompt = state.get("analysis_json", "{}")
-            plan_str = json.dumps(success_plan)
-            status_flag = "success"
-        else:
-            success_analysis = analysis_data
-            status_flag = "failure"
+    # 3. 构建 Prompt
+    if source_type == "success":
+        data_str = json.dumps(target_data, indent=2, ensure_ascii=False)
+        plan_str = json.dumps(plan_used, indent=2, ensure_ascii=False)
+        
+        final_prompt = f"""
+        你是一名严谨的计算化学家。你的任务是根据提供的【客观事实数据】撰写最终实验报告。
 
-    if status_flag == "success":
-        final_prompt = """
-        你是一名专攻异相催化和表面科学的计算化学专家。
-        你的规划和计算任务已成功执行，并且自动化分析工具已返回了 *基于事实* 的数据。
+        !!! 严重警告 !!!
+        你必须 **严格忠实** 于以下 JSON 数据。
+        - **严禁编造** 任何数字。
+        - **严禁编造** 吸附位点名称（以 `actual_site_type` 为准）。
+        
+        **用户请求:** {state['user_request']}
 
-        **你的原始规划 (你当初的意图):**
-        {plan}
+        **最佳吸附构型数据:**
+        ```json
+        {data_str}
+        ```
 
-        **自动化分析工具返回的真实数据 (客观事实):**
-        {analysis_json}
+        **初始规划:**
+        ```json
+        {plan_str}
+        ```
 
-        **你的任务:**
-        1.  **解读数据:** 查看 `analysis_json`。`is_covalently_bound` 是 True 还是 False？`most_stable_energy_eV` 和 `final_bond_distance_A` 是多少？
-        2.  **回答请求:** 根据这个 *真实数据*（而不是猜测），回答用户的原始请求：
-            '{user_request}'
-        3.  **提供关键信息:** 报告最稳定的能量、所有成键原子及键长（查看 `bonded_surface_atoms` 字段，如有多个成键原子，请全部列出）。
-        4.  **禁止幻觉:** 你的报告必须 100% 建立在上述 JSON 数据的客观事实上。
+        **撰写要求:**
+        1.  **结论:** 直接回答用户请求。
+        2.  **数据支撑:** 列出 `most_stable_energy_eV` (保留3位小数) 和 `final_bond_distance_A`。
+        3.  **几何细节:** 描述 `bonded_surface_atoms` 中的原子和距离。
+        4.  **位点纠正:** 如果 `actual_site_type` 与 `planned_site_type` 不符，明确指出发生了“位点滑移”。
+        5.  **化学状态判定 (重要):** 请检查 JSON 中的 `bond_change_count` 和 `reaction_detected` 字段：
+            - **完美吸附**: 如果 `bond_change_count == 0`，请报告为“分子以完整构型稳定吸附”。
+            - **异构化/重排**: 如果 `bond_change_count > 0` 但 `is_dissociated == False`，请特别强调：“吸附物在表面发生了 **分子内重排/异构化**（键变化数: {{bond_change_count}}），形成了更稳定的新构型。”这应被视为一个重要的化学发现。
+            - **解离**: 如果 `is_dissociated == True`，请报告为“吸附物发生了解离”。
         """
-        prompt = final_prompt.format(
-            plan=plan_str,
-            analysis_json=analysis_json_for_prompt,
-            user_request=state["user_request"]
-        )
     else:
-        fail_message = success_analysis.get("message", "未知的分析错误。")
-        if success_analysis.get("status") == "success" and not success_analysis.get("is_covalently_bound", False):
-            if "atom_1" in success_analysis and "atom_2" in success_analysis:
-                a1 = success_analysis["atom_1"]
-                a2 = success_analysis["atom_2"]
-                fail_message = (
-                    f"分析完成，但未完全键合。Atom 1 距离: {a1.get('distance_A', 'N/A')} Å "
-                    f"(是否成键: {a1.get('is_bound', False)}), "
-                    f"Atom 2 距离: {a2.get('distance_A', 'N/A')} Å "
-                    f"(是否成键: {a2.get('is_bound', False)})."
-                )
-            elif "final_bond_distance_A" in success_analysis:
-                dist = success_analysis.get("final_bond_distance_A", "N/A")
-                fail_message = f"分析完成，但吸附物未与表面键合。最终距离: {dist} Å。"
-
-        final_prompt = """
+        fail_reason = last_analysis.get("message", "未找到稳定构型。")
+        final_prompt = f"""
         你是一个错误报告助手。
-        计算任务执行失败或未能找到稳定的键合构型。
-
-        **你的唯一任务:**
-        1.  礼貌地告知用户计算模拟失败或未找到稳定构型。
-        2.  **逐字** 报告 `analysis_json` 中的 "message" 字段，或者报告未键合的事实。
-        3.  **严格禁止** 尝试回答用户的原始科学问题。
-        4.  **严格禁止** 猜测失败的原因或提供任何科学建议。
-        
-        **工具执行错误日志 (必须报告):**
-        {fail_message_to_report}
-        
-        **示例输出:**
-        "抱歉，计算模拟执行失败。自动化工具报告了以下错误：<fail_message_to_report>"
+        任务：礼貌地告知用户，在经过多次尝试后，未能找到符合要求的稳定吸附构型。
+        错误日志："{fail_reason}"
+        请建议用户检查 SMILES 或更换表面模型。严禁捏造结果。
         """
-        prompt = final_prompt.format(
-            fail_message_to_report=fail_message
-        )
+
+    # 4. 调用 LLM
+    response = llm.invoke([HumanMessage(content=final_prompt)])
     
-    response = llm.invoke([HumanMessage(content=prompt)])
-    
-    print("--- 🏁 流程结束 ---")
+    print("--- 🏁 最终报告生成完毕 ---")
     return {"messages": [AIMessage(content=response.content)]}
 
 # --- 4. 定义图的逻辑流 (Edges) ---
@@ -609,111 +584,72 @@ def route_after_validation(state: AgentState) -> str:
         print(f"--- 决策: 方案通过，前往执行 ---")
         return "tool_executor"
 
-import json # 确保 json 已导入
-
 def route_after_analysis(state: AgentState) -> str:
     """
-    检查计算结果，记录成功或失败，并始终返回规划器继续搜索。
-    只有在达到重试上限时才停止。
+    简化的路由器：生成富含信息的历史记录，并决定下一步方向。
+    注意：不要在此处更新 state["best_result"]，该操作已在 tool_executor 中完成。
     """
     print("--- 🤔 Python 决策分支 3 (分析器) ---")
     current_history = state.get("history", [])
-    history_entry = ""
+    
     try:
         analysis_data = json.loads(state.get("analysis_json", "{}"))
         status = analysis_data.get("status")
-
+        
+        # 提取规划描述
+        plan = state.get("plan", {}).get("solution", {})
+        plan_desc = f"{plan.get('site_type')} @ {plan.get('surface_binding_atoms')} (Index {plan.get('adsorbate_binding_indices')})"
+        
         if status == "fatal_error":
-            print(f"--- 决策: 致命错误。流程结束。 ---")
-            history_entry = f"致命错误: {analysis_data.get('message', '未知致命错误。')}"
-            current_history.append(history_entry)
-            state["history"] = current_history
+            state["history"].append(f"【致命错误】 方案: {plan_desc} -> {analysis_data.get('message')}")
             return "end"
 
-        is_bound = analysis_data.get("is_covalently_bound", False) 
-        reaction_detected = analysis_data.get("reaction_detected", False)
-        bond_change_count = analysis_data.get("bond_change_count", 0)
-        plan_str = json.dumps(state.get("plan", "{}"))
+        # 1. 提取关键指标
+        energy = analysis_data.get("most_stable_energy_eV", "N/A")
+        bond_change = analysis_data.get("bond_change_count", 0)
+        is_dissociated = analysis_data.get("is_dissociated", False)
+        
+        # 2. [关键增强] 提取位点滑移信息
+        # 这能告诉 Planner："你原本想去 Bridge，但实际去了 Hollow"
+        actual_site = analysis_data.get("site_analysis", {}).get("actual_site_type", "unknown")
+        planned_site = analysis_data.get("site_analysis", {}).get("planned_site_type", "unknown")
+        
+        site_msg = f"位点: {actual_site}"
+        if actual_site != "unknown" and planned_site != "unknown" and actual_site != planned_site:
+            site_msg = f"⚠️位点滑移: {planned_site}->{actual_site}"
 
-        if status == "success" and is_bound and not reaction_detected:
-            # --- 成功逻辑 ---
-            energy = analysis_data.get("most_stable_energy_eV", "N/A")
-            
-            # 更新全局最优结果（best_result）
-            try:
-                if isinstance(energy, (int, float)):
-                    best = state.get("best_result")
-                    current_best = None
-                    if isinstance(best, dict):
-                        current_best = best.get("most_stable_energy_eV", None)
-
-                    if (current_best is None) or (energy < current_best):
-                        print(f"--- 🌟 更新全局最优方案: E_ads 从 {current_best} → {energy:.4f} eV ---")
-                        state["best_result"] = {
-                            "most_stable_energy_eV": float(energy),
-                            "analysis_json": analysis_data,
-                            "plan": state.get("plan"),
-                        }
-            except Exception as e_best:
-                print(f"--- ⚠️ 更新 best_result 失败: {e_best} ---")
-
+        # 3. 构建历史条目
+        if status == "success":
+            if is_dissociated:
+                res_str = "❌ 分子解离"
+            elif bond_change > 0:
+                res_str = f"⚠️ 分子内重排(BC={bond_change})"
+            else:
+                res_str = "✅ 完美吸附"
+                
+            # 格式：[结果] 方案 -> 实际位点 | 能量
             history_entry = (
-                f"成功的尝试: Plan={plan_str}, "
-                f"Result=键合成功, 能量={energy:.4f} eV, 键变化数={bond_change_count}。"
+                f"【{res_str}】 {plan_desc} "
+                f"-> {site_msg} | "
+                f"E={energy:.3f} eV"
             )
-            print(f"--- 决策: 找到稳定键合 (E={energy:.4f} eV)。记录并返回规划器继续搜索。 ---")
-        elif status == "success" and reaction_detected:
-            # --- 失败逻辑 (发生了反应) ---
-            energy = analysis_data.get("most_stable_energy_eV", "N/A")
-            history_entry = f"失败的尝试: Plan={plan_str}, Result=检测到反应性转变 (键变化数={bond_change_count})。虽然最终能量为 {energy:.4f} eV，但该构型不稳定并已解离。"
-            print(f"--- 决策: 检测到反应性转变。记录并返回规划器重试。 ---")
         else:
-            # --- 失败逻辑 (未键合或计算失败) ---
-            fail_reason = analysis_data.get("message", "计算失败或未键合。")
-            if status == "success" and not is_bound:
-                if "atom_1" in analysis_data and "atom_2" in analysis_data: # side-on
-                    a1_dist = analysis_data["atom_1"].get("distance_A", "N/A")
-                    a1_bound = analysis_data["atom_1"].get("is_bound", False)
-                    a2_dist = analysis_data["atom_2"].get("distance_A", "N/A")
-                    a2_bound = analysis_data["atom_2"].get("is_bound", False)
-                    fail_reason = f"分析完成，但未完全键合。Atom 1 距离: {a1_dist} Å (是否成键: {a1_bound}), Atom 2 距离: {a2_dist} Å (是否成键: {a2_bound})."
-                
-                elif "final_bond_distance_A" in analysis_data: # end-on
-                    dist = analysis_data.get("final_bond_distance_A", "N/A")
-                    fail_reason = f"分析完成，但吸附物未与表面键合。最终距离: {dist} Å。"
-                
-                else:
-                    fail_reason = analysis_data.get("message", "分析完成，但 is_covalently_bound 为 false。")
-
-            history_entry = f"失败的尝试: Plan={plan_str}, Result={fail_reason}。"
-            print(f"--- 决策: 计算失败 ({fail_reason})。记录并返回规划器重试。 ---")
+            history_entry = f"【计算失败】 {plan_desc} -> 原因: {analysis_data.get('message')}"
+            
+        current_history.append(history_entry)
 
     except Exception as e:
-        print(f"--- 决策: 分析路由失败 ({e})。返回规划器重试。 ---")
-        history_entry = f"分析路由失败: {e}"
+        current_history.append(f"历史记录生成异常: {e}")
 
-    # --- 记录已经尝试过的组合 key，用于后续防重复 ---
-    try:
-        attempted_keys = state.get("attempted_keys", [])
-        if not isinstance(attempted_keys, list):
-            attempted_keys = []
-        plan_json = state.get("plan")
-        key = make_plan_key(plan_json)
-        if key is not None and key not in attempted_keys:
-            attempted_keys.append(key)
-        state["attempted_keys"] = attempted_keys
-    except Exception as e_keys:
-        print(f"--- ⚠️ 记录 attempted_keys 失败: {e_keys} ---")
-
-    # --- 统一的路由逻辑 ---
-    current_history.append(history_entry)
+    # 更新历史记录
     state["history"] = current_history
 
-    if len(current_history) > MAX_RETRIES:
+    # 4. 决策逻辑
+    if len(current_history) >= MAX_RETRIES:
         print(f"--- 决策: 已达到 {len(current_history)} 次尝试上限。流程结束。 ---")
-        return "end" # 达到上限，停止
+        return "end"
     
-    return "planner" # 未达到上限，继续搜索
+    return "planner"
 
 # --- 5. 构建并编译图 (Graph) ---
 def get_agent_executor():
@@ -753,7 +689,8 @@ def _prepare_initial_state(smiles: str, slab_path: str, user_request: str) -> Ag
         "analysis_json": None,
         "history": [],
         "best_result": None,
-        "attempted_keys": []
+        "attempted_keys": [],
+        "available_sites_description": None
     }
 
 def parse_args():

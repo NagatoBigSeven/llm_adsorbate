@@ -68,11 +68,6 @@ def get_shrinkwrap_grid_fixed(
 
     return grid, faces
 
-# 应用补丁：用我们的修复版函数替换掉库中的原函数
-print("--- 🩹 应用 Autoadsorbate 死循环热修复 (Monkey Patch) ... ---")
-autoadsorbate.Surf.get_shrinkwrap_grid = get_shrinkwrap_grid_fixed
-print("--- ✅ 修复已应用。Surf.get_shrinkwrap_grid 已被安全替换。 ---")
-
 def get_shrinkwrap_ads_sites_fixed(
     atoms: Atoms,
     precision: float = 0.25,  # 默认精度从 0.5 提升到 0.25
@@ -190,11 +185,19 @@ def get_shrinkwrap_ads_sites_fixed(
 
     return sites_dict
 
-# 应用补丁 2
-print("--- 🩹 应用 Autoadsorbate 位点分类精度修复 (Monkey Patch 2) ... ---")
+# 应用补丁：用我们的修复版函数替换掉库中的原函数
+print("--- 🩹 应用 Autoadsorbate 热修复 (Monkey Patch) ... ---")
+
+# 1. Patch 源头 (Surf.py) - 以防万一有其他地方用它
+autoadsorbate.Surf.get_shrinkwrap_grid = get_shrinkwrap_grid_fixed
 autoadsorbate.Surf.get_shrinkwrap_ads_sites = get_shrinkwrap_ads_sites_fixed
-print("--- ✅ 修复已应用。Surf.get_shrinkwrap_ads_sites 已被安全替换 (epsilon=0.3, prec=0.25)。 ---")
-# ================= Monkey Patch Fix 2 End =================
+
+# 2. 关键修复：Patch 消费者 (autoadsorbate.py)
+# 必须覆盖 autoadsorbate.autoadsorbate 命名空间里已经导入的旧函数引用
+import autoadsorbate.autoadsorbate 
+autoadsorbate.autoadsorbate.get_shrinkwrap_ads_sites = get_shrinkwrap_ads_sites_fixed
+
+print("--- ✅ 修复已应用。Surf 模块及 Surface 类引用的函数已被安全替换。 ---")
 
 from collections import Counter
 import ase
@@ -406,62 +409,77 @@ def prepare_slab(slab_atoms: ase.Atoms) -> Tuple[ase.Atoms, bool]:
         
     return clean_slab, is_expanded
 
-def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_initialize: int = 1) -> Union[Fragment, ase.Atoms]:
-    # 确定 TRICK_SMILES，以便稍后设置 .info["smiles"]
-    TRICK_SMILES = ""
-    if site_type == "ontop":
-        TRICK_SMILES = "Cl"
-    elif site_type in ["bridge", "hollow"]:
-        TRICK_SMILES = "S1S"
-    else:
-        raise ValueError(f"未知的 site_type: {site_type}")
+def analyze_surface_sites(slab_path: str) -> dict:
+    """ 预扫描表面，找出实际存在的位点类型，供 Planner 参考 """
+    from collections import defaultdict, Counter
+    atoms = read_atoms_object(slab_path)
+    clean_slab, _ = prepare_slab(atoms)
+    
+    # 空跑 Autoadsorbate
+    s = Surface(clean_slab, precision=1.0, touch_sphere_size=3.0, mode='slab')
+    s.sym_reduce()
+    
+    site_inventory = defaultdict(set)
+    for _, row in s.site_df.iterrows():
+        conn = row['connectivity']
+        # 将 {'Mo':2, 'Pd':1} 转为 "Mo-Mo-Pd"
+        elements = []
+        for el, count in row['site_formula'].items():
+            elements.extend([el] * count)
+        site_desc = "-".join(sorted(elements))
+        site_inventory[conn].add(site_desc)
 
+    desc_list = []
+    conn_map = {1: "Ontop", 2: "Bridge", 3: "Hollow-3", 4: "Hollow-4"}
+    for conn, sites in site_inventory.items():
+        label = conn_map.get(conn, f"{conn}-fold")
+        desc_list.append(f"[{label}]: {', '.join(sorted(list(sites)))}")
+        
+    return {
+        "surface_composition": [item[0] for item in Counter(clean_slab.get_chemical_symbols()).most_common()],
+        "available_sites_description": "; ".join(desc_list)
+    }
+
+def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_initialize: int = 1) -> Union[Fragment, ase.Atoms]:
+    TRICK_SMILES = "Cl" if site_type == "ontop" else "S1S"
     print(f"--- 🛠️ _get_fragment: 正在为 {site_type} 位点准备 {TRICK_SMILES} 标记...")
 
     try:
-        mol = Chem.MolFromSmiles(SMILES)
+        mol = Chem.MolFromSmiles(SMILES, sanitize=False)
         if not mol:
             raise ValueError(f"RDKit 无法解析映射的 SMILES: {SMILES}")
+        mol.UpdatePropertyCache(strict=False)
         
         try:
             mol_with_hs = Chem.AddHs(mol)
         except Exception:
-            print(f"--- 🛠️ _get_fragment: 警告: Chem.AddHs 失败，正在尝试在没有显式H的情况下继续... ---")
             mol_with_hs = mol
         
-        # 使用 RDKit 生成构象 (与 autoadsorbate 内部逻辑类似)
-        params = AllChem.ETKDGv3()
-        params.randomSeed = 0xF00D # 任意的种子
-        params.pruneRmsThresh = 0.5 # 合理的剪枝阈值
-        params.numThreads = 0 # 使用所有核心
-        conf_ids = list(AllChem.EmbedMultipleConfs(mol_with_hs, numConfs=to_initialize, params=params))
-        
-        if not conf_ids:
-             # 回退到更简单的嵌入器
-             if AllChem.EmbedMolecule(mol_with_hs, AllChem.ETKDGv2()) == -1:
-                 # 再次尝试
-                 if AllChem.EmbedMolecule(mol_with_hs, AllChem.ETKDGv2()) == -1:
-                    raise ValueError(f"RDKit 未能为 {SMILES} 生成构象。")
-             conf_ids = [0]
-        
-        # === 在 UFF 优化前清除电荷 ===
-        # 创建一个用于优化的临时分子副本
+        # 清除电荷以安抚 UFF 力场
         mol_for_opt = Chem.Mol(mol_with_hs)
         for atom in mol_for_opt.GetAtoms():
-            if atom.GetFormalCharge() != 0:
-                atom.SetFormalCharge(0) # 强制中性化，以便 UFF 识别原子类型
+            atom.SetFormalCharge(0)
 
-        # 尝试优化这个“干净”的分子
+        params = AllChem.ETKDGv3()
+        params.randomSeed = 0xF00D
+        params.pruneRmsThresh = 0.5
+        params.numThreads = 0
+        conf_ids = list(AllChem.EmbedMultipleConfs(mol_for_opt, numConfs=to_initialize, params=params))
+        
+        if not conf_ids:
+            AllChem.EmbedMolecule(mol_for_opt, AllChem.ETKDGv2())
+            conf_ids = [0]
+
         try:
             AllChem.UFFOptimizeMoleculeConfs(mol_for_opt)
-            # 将优化后的坐标倒回原分子 (带有映射信息的分子)
-            for i in range(len(conf_ids)):
-                conf_src = mol_for_opt.GetConformer(conf_ids[i])
-                conf_dst = mol_with_hs.GetConformer(conf_ids[i])
-                conf_dst.SetPositions(conf_src.GetPositions())
         except Exception as e:
-            # UFFTYPER 警告会在这里被捕获。我们忽略它们并继续。
-            print(f"--- 🛠️ _get_fragment: 警告: UFF 优化失败或发出警告 ({e})。使用未优化的构象。 ---")
+            print(f"--- ⚠️ UFF 优化警告: {e} ---")
+        
+        mol_with_hs.RemoveAllConformers()
+        for i, cid in enumerate(conf_ids):
+            conf_src = mol_for_opt.GetConformer(cid)
+            new_conf = Chem.Conformer(conf_src)
+            mol_with_hs.AddConformer(new_conf, assignId=True)
 
         reordered_conformers = []
         all_rdkit_atoms = list(mol_with_hs.GetAtoms())
@@ -811,11 +829,10 @@ def populate_surface_with_fragment(
       verbose=True
     )
     
-    # === 对生成的构型进行碰撞检测和抬升 ===
+    # 对生成的构型进行碰撞检测和抬升 (阈值 1.8 Å)
     safe_out_trj = []
     for idx, atoms in enumerate(raw_out_trj):
-        # 使用 1.3 Å 作为硬性防爆阈值 (共价键通常 > 1.4 Å，小于 1.3 几乎肯定是排斥区)
-        safe_atoms = _bump_adsorbate_to_safe_distance(slab_atoms, atoms, min_dist_threshold=1.3)
+        safe_atoms = _bump_adsorbate_to_safe_distance(slab_atoms, atoms, min_dist_threshold=1.8)
         safe_out_trj.append(safe_atoms)
     
     out_trj = safe_out_trj
@@ -864,35 +881,50 @@ def relax_atoms(
 
     # 约束
     constraint = FixAtoms(indices=slab_indices)
+
+    def _get_bond_change_count(initial, final):
+        if len(initial) != len(final):
+            return 0
+        radii = np.array(natural_cutoffs(initial, mult=1.05))
+        cutoff_mat = radii[:, None] + radii[None, :]
+        d_initial = initial.get_all_distances()
+        d_final = final.get_all_distances()
+
+        # 忽略 H-H 键
+        symbols = initial.get_chemical_symbols()
+        is_H = np.array([s == 'H' for s in symbols])
+        mask = is_H[:, None] & is_H[None, :]
+        np.fill_diagonal(d_initial, 99.0)
+        np.fill_diagonal(d_final, 99.0)
+
+        bonds_initial = (d_initial < cutoff_mat) & (~mask)
+        # 宽松阈值检测断键 (1.3倍)
+        bonds_final_loose = (d_final < cutoff_mat * 1.3) & (~mask)
+        bonds_final_strict = (d_final < cutoff_mat) & (~mask)
+
+        broken = bonds_initial & (~bonds_final_loose)
+        formed = (~bonds_initial) & bonds_final_strict
+        return int(np.sum(np.triu(broken | formed)))
     
     # --- 1. 评估阶段 (预热 + 单点能量) ---
     print(f"--- 🛠️ 评估阶段：正在评估 {len(atoms_list)} 个构型 (MD 预热 + SP 能量)... ---")
-    evaluated_configs = [] # 列表将存储: (energy, original_index, atoms_object)
-    
+    evaluated_configs = []
     for i, atoms in enumerate(atoms_list):
-        try:
-            atoms.calc = calculator
-            atoms.set_constraint(constraint)
-            
-            # 先计算一次静态力，防止 MD 或 BFGS 因为力太大直接崩掉
-            forces = atoms.get_forces()
-            max_force = np.linalg.norm(forces, axis=1).max()
-            
-            # 阈值设为 50 eV/A (这是一个非常巨大的力，正常分子不应超过此值)
-            if max_force > 50.0:
-                print(f"--- ⚠️ 跳过结构 {i+1}: 初始力过大 (Max Force = {max_force:.2f} eV/A)，结构极不稳定。 ---")
-                continue
+        atoms.calc = calculator
+        atoms.set_constraint(constraint)
+        
+        if np.max(np.linalg.norm(atoms.get_forces(), axis=1)) > 500.0:
+            print(f"--- ⚠️ 跳过结构 {i+1}: 初始力过大 (Max Force = {max_force:.2f} eV/A)... ---")
+            continue
 
-            if md_steps > 0:
-                MaxwellBoltzmannDistribution(atoms, temperature_K=md_temp)
-                dyn_md = Langevin(atoms, 1 * units.fs, temperature_K=md_temp, friction=0.01)
-                dyn_md.run(md_steps)
+        if md_steps > 0:
+            MaxwellBoltzmannDistribution(atoms, temperature_K=md_temp)
+            dyn_md = Langevin(atoms, 1 * units.fs, temperature_K=md_temp, friction=0.01)
+            dyn_md.run(md_steps)
 
-            energy = atoms.get_potential_energy()
-            print(f"--- 评估 结构 {i+1}/{len(atoms_list)}. 能量 (预热后): {energy:.4f} eV ---")
-            evaluated_configs.append((energy, i, atoms.copy())) # 存储副本
-        except Exception as e:
-            print(f"--- 🛑 评估 结构 {i+1} 失败: {e} ---")
+        energy = atoms.get_potential_energy()
+        print(f"--- 评估结构 {i+1}/{len(atoms_list)}... 能量 (预热后): {energy:.4f} eV ---")
+        evaluated_configs.append((energy, i, atoms.copy())) # 存储副本
 
     if not evaluated_configs:
         raise ValueError("评估阶段未能成功评估任何构型。")
@@ -913,70 +945,30 @@ def relax_atoms(
     traj = Trajectory(traj_file, 'w')
     final_structures = []
 
-    # 定义一个通用的、不依赖 autoadsorbate 库的键完整性检查器
-    def _get_bond_change_count(initial_adsorbate, final_adsorbate):
-        try:
-            if len(initial_adsorbate) != len(final_adsorbate):
-                return -2 # 原子数不匹配
-
-            # 1. 获取初始连接矩阵 (忽略 H-H 键)
-            initial_distances = initial_adsorbate.get_all_distances()
-            initial_cutoffs = natural_cutoffs(initial_adsorbate, mult=1.1)
-            initial_bonds = initial_distances < (np.array([initial_cutoffs]).T + initial_cutoffs)
-            np.fill_diagonal(initial_bonds, False)
-            h_indices_initial = [a.index for a in initial_adsorbate if a.symbol == 'H']
-            for i in h_indices_initial:
-                for j in h_indices_initial:
-                    initial_bonds[i, j] = False
-            
-            # 2. 获取最终连接矩阵 (忽略 H-H 键)
-            final_distances = final_adsorbate.get_all_distances()
-            final_cutoffs = natural_cutoffs(final_adsorbate, mult=1.1)
-            final_bonds = final_distances < (np.array([final_cutoffs]).T + final_cutoffs)
-            np.fill_diagonal(final_bonds, False)
-            h_indices_final = [a.index for a in final_adsorbate if a.symbol == 'H']
-            for i in h_indices_final:
-                for j in h_indices_final:
-                    final_bonds[i, j] = False
-
-            # 3. 比较
-            diff_matrix = initial_bonds.astype(int) - final_bonds.astype(int)
-            diff_upper = np.triu(diff_matrix)
-            bond_change_count = np.sum(np.abs(diff_upper))
-            return int(bond_change_count)
-
-        except Exception as e_bond:
-            print(f"--- 🛠️ 警告: 内部键完整性检查失败: {e_bond} ---")
-            return -1 # 标记为检查失败
-
     for i, (initial_energy, original_index, atoms) in enumerate(configs_to_relax):
-        print(f"--- 弛豫最佳结构 {i+1}/{N_RELAX_TOP_N} (原始 Index {original_index}, E_pre={initial_energy:.4f} eV) ---")
+        print(f"--- 弛豫最佳结构 {i+1}/{N_RELAX_TOP_N} (原始 Index {original_index}, 初始能量: {initial_energy:.4f} eV) ---")
         
         atoms.calc = calculator
         atoms.set_constraint(constraint)
 
-        # --- 🛠️ 捕获弛豫前的吸附物状态 ---
-        adsorbate_indices_for_copy = list(range(len(slab_indices), len(atoms)))
-        initial_adsorbate = atoms.copy()[adsorbate_indices_for_copy]
+        # --- 捕获弛豫前的吸附物 ---
+        adsorbate_indices = list(range(len(slab_indices), len(atoms)))
+        initial_adsorbate = atoms.copy()[adsorbate_indices]
         
         print(f"--- 优化 (BFGS): fmax={fmax}, steps={steps} ---")
         dyn_opt = BFGS(atoms, trajectory=None, logfile=None) 
-        
         dyn_opt.attach(lambda: traj.write(atoms), interval=1)
-        
         dyn_opt.run(fmax=fmax, steps=steps)
 
-        # --- 🛠️ 捕获弛豫后的吸附物状态并检查键变化 ---
-        final_adsorbate = atoms.copy()[adsorbate_indices_for_copy]
-        
-        # 调用我们刚刚定义的内部函数
+        # --- 捕获弛豫后的吸附物状态并检查键变化 ---
+        final_adsorbate = atoms.copy()[adsorbate_indices]
         bond_change_count = _get_bond_change_count(initial_adsorbate, final_adsorbate)
-        atoms.info["bond_change_count"] = bond_change_count # 存储结果
-        print(f"--- 键完整性检查: {bond_change_count} 个键发生变化。 ---")
+        atoms.info["bond_change_count"] = bond_change_count
+        print(f"--- 键完整性检查: 检测到 {bond_change_count} 个键发生了变化。 ---")
         
         final_energy = atoms.get_potential_energy()
         final_forces = atoms.get_forces()
-        print(f"--- 结构 {i+1} 弛豫完成。最终能量: {final_energy:.4f} eV ---")
+        print(f"--- 最佳结构 {i+1} 弛豫完成。最终能量: {final_energy:.4f} eV ---")
 
         atoms.results = {
             'energy': final_energy,
@@ -1066,12 +1058,21 @@ def analyze_relaxation_results(
         # 正常情况下，单分子吸附应该只有 1 个连通分量
         is_dissociated = n_components > 1
 
-        # 6. 获取键变化计数 (作为辅助参考)
-        bond_change_count = relaxed_atoms.info.get("bond_change_count", -1) # -1 表示检查失败
+        # 6. 获取键变化计数作为辅助参考
+        bond_change_count = relaxed_atoms.info.get("bond_change_count", 0)
 
         # 7. 综合判定反应性
-        # 只要分子碎了(is_dissociated) 或者 键变了(bond_change_count > 0)，都算发生了反应
-        reaction_detected = is_dissociated or (bond_change_count > 0)
+        if is_dissociated:
+             # 只要碎了，就是反应/失败
+             reaction_detected = True
+        elif bond_change_count > 0:
+             # 没碎，但是键变了 -> 这是“内反应/异构化”
+             # 我们可以标记为 reaction_detected = True，
+             # 但在 Agent 的 route_after_analysis 中，你可以选择是否“宽容”处理这种情况
+             reaction_detected = True
+        else:
+             # 没碎，键也没变 -> 完美的分子吸附
+             reaction_detected = False
 
         # --- 从 plan_dict 检索信息 ---
         plan_solution = plan_dict.get("solution", {})
@@ -1190,8 +1191,9 @@ def analyze_relaxation_results(
 
             analysis_message = (
                 f"最稳定构型吸附能: {E_ads:.4f} eV。"
-                f"目标吸附物原子: {target_atom_symbol} (来自规划索引 {binding_atom_indices[0]}，在弛豫结构中为全局索引 {target_atom_global_index})。 "
-                f"成键表面原子: {bonded_desc} (最近原子: {nearest_slab_atom_symbol}, 距离: {round(min_distance, 3)} Å)。 "
+                f"目标原子: {target_atom_symbol} (来自规划索引 {binding_atom_indices[0]}，在弛豫结构中为全局索引 {target_atom_global_index})。"
+                f"  -> 最近: {nearest_slab_atom_symbol} (Index {nearest_slab_atom_global_index}), 距离: {round(min_distance, 3)} Å (阈值: {round(bonding_cutoff, 3)}), 成键: {is_bound}。"
+                f"成键表面原子: {bonded_desc}。 "
                 f"是否成键: {is_bound}。"
                 f"是否发生反应性转变: {reaction_detected} (键变化数: {bond_change_count} )。"
             )
@@ -1202,7 +1204,7 @@ def analyze_relaxation_results(
                 "most_stable_energy_eV": E_ads,
                 "target_adsorbate_atom": target_atom_symbol,
                 "target_adsorbate_atom_index": int(target_atom_global_index),
-                "bonded_surface_atoms": bonded_surface_atoms, # [新增] 包含所有成键原子的列表
+                "bonded_surface_atoms": bonded_surface_atoms,
                 "nearest_slab_atom": nearest_slab_atom_symbol,
                 "nearest_slab_atom_index": int(nearest_slab_atom_global_index),
                 "final_bond_distance_A": round(min_distance, 3),
@@ -1260,12 +1262,53 @@ def analyze_relaxation_results(
             # 只有两个原子都成键时，才算成功
             is_bound = bool(is_bound_1 and is_bound_2) 
             
+            # 生成统一的 bonded_surface_atoms 和 final_bond_distance_A ===
+            bonded_surface_atoms = []
+
+            # 定义辅助函数：查找某个吸附原子的所有成键对象
+            def find_bonds(ads_idx, ads_symbol):
+                bonds = []
+                r_ads = cov_cutoffs[ads_idx]
+                for s_idx in slab_indices:
+                    # 使用 MIC (最小镜像约定) 计算距离
+                    d = relaxed_atoms.get_distance(ads_idx, s_idx, mic=True)
+                    r_slab = cov_cutoffs[s_idx]
+                    # 判定成键
+                    if d <= (r_ads + r_slab) * 1.1:
+                        bonds.append({
+                            "adsorbate_atom": ads_symbol,
+                            "symbol": relaxed_atoms[s_idx].symbol,
+                            "index": int(s_idx),
+                            "distance": round(d, 3)
+                        })
+                return bonds
+
+            # 收集两个原子的成键信息
+            bonded_surface_atoms.extend(find_bonds(target_atom_global_index, target_atom_symbol))
+            bonded_surface_atoms.extend(find_bonds(second_atom_global_index, second_atom_symbol))
+            
+            # 按距离排序
+            bonded_surface_atoms.sort(key=lambda x: x["distance"])
+
+            # 计算最终的最短键长 (用于报告)
+            if bonded_surface_atoms:
+                final_bond_distance_A = bonded_surface_atoms[0]["distance"]
+            else:
+                final_bond_distance_A = min(min_distance, min_distance_2)
+            
+            # 生成描述字符串
+            if bonded_surface_atoms:
+                bonded_desc = ", ".join([f"{b['adsorbate_atom']}-{b['symbol']}({b['distance']}Å)" for b in bonded_surface_atoms])
+            else:
+                bonded_desc = "无"
+
             analysis_message = (
                 f"最稳定构型吸附能: {E_ads:.4f} eV。"
                 f"目标原子 1: {target_atom_symbol} (来自规划索引 {binding_atom_indices[0]}，全局索引 {target_atom_global_index})。"
                 f"  -> 最近: {nearest_slab_atom_symbol} (Index {nearest_slab_atom_global_index}), 距离: {round(min_distance, 3)} Å (阈值: {round(bonding_cutoff, 3)}), 成键: {is_bound_1}。"
                 f"目标原子 2: {second_atom_symbol} (来自规划索引 {binding_atom_indices[1]}，全局索引 {second_atom_global_index})。"
                 f"  -> 最近: {nearest_slab_atom_symbol_2} (Index {nearest_slab_atom_global_index_2}), 距离: {round(min_distance_2, 3)} Å (阈值: {round(bonding_cutoff_2, 3)}), 成键: {is_bound_2}。"
+                f"成键表面原子: {bonded_desc}。 "
                 f"是否成键: {is_bound}。"
                 f"是否发生反应性转变: {reaction_detected} (键变化数: {bond_change_count} )。"
             )
@@ -1274,6 +1317,8 @@ def analyze_relaxation_results(
                 "status": "success",
                 "message": analysis_message,
                 "most_stable_energy_eV": E_ads,
+                "bonded_surface_atoms": bonded_surface_atoms,
+                "final_bond_distance_A": round(final_bond_distance_A, 3),
                 "is_covalently_bound": is_bound,
                 "atom_1": {
                     "symbol": target_atom_symbol,
@@ -1306,14 +1351,16 @@ def analyze_relaxation_results(
         # 防止文件名冲突导致覆盖历史最优解。
         # 在文件名中加入：位点类型、表面原子组成、能量。
         
-        # 提取位点信息用于文件名
-        site_type_str = plan_solution.get('site_type', 'unknown')
-        binding_atoms_str = "-".join(sorted(plan_solution.get('surface_binding_atoms', [])))
+        # 命名逻辑
+        site_label = actual_site_type if actual_site_type != "unknown" else planned_site_type
+        if planned_site_type != "unknown" and site_label != planned_site_type:
+            site_label = f"{planned_site_type}_to_{site_label}"
+            
+        if is_dissociated: site_label += "_DISS"
+        elif bond_change_count > 0: site_label += "_ISO"
         
-        # 构建唯一文件名 (例如: BEST_[H]_hollow_Mo-Mo-Pd_E-2.638.xyz)
-        # 替换掉文件名中可能导致问题的字符
         clean_smiles = original_smiles.replace('=', '_').replace('#', '_').replace('[', '').replace(']', '')
-        best_atoms_filename = f"outputs/BEST_{clean_smiles}_{site_type_str}_{binding_atoms_str}_E{E_ads:.3f}.xyz"
+        best_atoms_filename = f"outputs/BEST_{clean_smiles}_{site_label}_E{E_ads:.3f}.xyz"
         
         try:
             write(best_atoms_filename, relaxed_atoms)
