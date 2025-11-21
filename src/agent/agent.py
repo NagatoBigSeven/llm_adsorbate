@@ -50,6 +50,7 @@ class AgentState(TypedDict):
     analysis_json: Optional[str]
     history: List[str]
     best_result: Optional[dict]
+    best_dissociated_result: Optional[dict]
     attempted_keys: List[str]
     available_sites_description: Optional[str]
 
@@ -303,7 +304,8 @@ def tool_executor_node(state: AgentState) -> dict:
     tool_logs = []
     analysis_json = None
 
-    new_best = state.get("best_result") # 在此处初始化 new_best，确保无论是否报错它都有值
+    new_best_molecular = state.get("best_result")
+    new_best_dissociated = state.get("best_dissociated_result")
     
     try:
         # 1. 读取原始 Slab
@@ -446,19 +448,33 @@ def tool_executor_node(state: AgentState) -> dict:
         print(f"--- 🔬 分析结果: {analysis_json_str} ---")
         analysis_json = json.loads(analysis_json_str)
 
-        # 只要没解离，就算有效结果
-        if analysis_json.get("status") == "success" and not analysis_json.get("is_dissociated"):
+        if analysis_json.get("status") == "success":
             e_new = analysis_json.get("most_stable_energy_eV")
-            e_old = new_best.get("most_stable_energy_eV", float('inf')) if new_best else float('inf')
-            
-            if isinstance(e_new, (int, float)) and e_new < e_old:
-                print(f"--- 🌟 发现新最优解: {e_new:.4f} eV ---")
-                new_best = {
-                    "most_stable_energy_eV": e_new,
-                    "analysis_json": analysis_json,
-                    "plan": state.get("plan"),
-                    "result_type": "Perfect" if analysis_json.get("bond_change_count")==0 else "Isomerized"
-                }
+            is_dissociated = analysis_json.get("is_dissociated")
+
+            # 逻辑分支 A: 如果是完整的分子 (Molecular State)
+            if not is_dissociated:
+                e_old_mol = new_best_molecular.get("most_stable_energy_eV", float('inf')) if new_best_molecular else float('inf')
+                if isinstance(e_new, (int, float)) and e_new < e_old_mol:
+                    print(f"--- 🌟 发现新最优 [分子态]: {e_new:.4f} eV ---")
+                    new_best_molecular = {
+                        "most_stable_energy_eV": e_new,
+                        "analysis_json": analysis_json,
+                        "plan": state.get("plan"),
+                        "result_type": "Perfect" if analysis_json.get("bond_change_count")==0 else "Isomerized"
+                    }
+
+            # 逻辑分支 B: 如果是解离态 (Dissociated State) - [新增]
+            else:
+                e_old_diss = new_best_dissociated.get("most_stable_energy_eV", float('inf')) if new_best_dissociated else float('inf')
+                if isinstance(e_new, (int, float)) and e_new < e_old_diss:
+                    print(f"--- ⚠️ 发现更稳定的 [解离态]: {e_new:.4f} eV (将作为热力学参考) ---")
+                    new_best_dissociated = {
+                        "most_stable_energy_eV": e_new,
+                        "analysis_json": analysis_json,
+                        "plan": state.get("plan"),
+                        "result_type": "Dissociated"
+                    }
 
     except Exception as e:
         error_message = str(e)
@@ -469,7 +485,8 @@ def tool_executor_node(state: AgentState) -> dict:
     return {
         "messages": [ToolMessage(content="\n".join(tool_logs), tool_call_id="tool_executor")],
         "analysis_json": json.dumps(analysis_json),
-        "best_result": new_best
+        "best_result": new_best_molecular,
+        "best_dissociated_result": new_best_dissociated
     }
 
 def final_analyzer_node(state: AgentState) -> dict:
@@ -481,7 +498,8 @@ def final_analyzer_node(state: AgentState) -> dict:
     llm = get_llm()
     
     # 1. 提取数据源
-    best_result = state.get("best_result") 
+    best_result = state.get("best_result")
+    best_dissociated = state.get("best_dissociated_result")
     last_analysis_json_str = state.get("analysis_json", "{}")
     
     try:
@@ -521,6 +539,21 @@ def final_analyzer_node(state: AgentState) -> dict:
         data_str = json.dumps(target_data, indent=2, ensure_ascii=False)
         plan_str = json.dumps(plan_used, indent=2, ensure_ascii=False)
         
+        # [新增] 准备解离态对比数据
+        diss_warning_context = ""
+        if best_dissociated:
+            e_mol = target_data.get("most_stable_energy_eV", 999)
+            e_diss = best_dissociated.get("most_stable_energy_eV", 999)
+            if e_diss < e_mol:
+                delta_E = e_diss - e_mol
+                diss_warning_context = (
+                    f"\n*** 严重热力学警告数据 ***\n"
+                    f"虽然用户要求寻找分子吸附，但系统在历史计算中发现了能量更低的解离态。\n"
+                    f"- 分子态能量: {e_mol:.3f} eV\n"
+                    f"- 解离态能量: {e_diss:.3f} eV (更稳定 {abs(delta_E):.3f} eV)\n"
+                    f"这意味着报告的分子态在热力学上是亚稳的，容易自发解离。"
+                )
+
         final_prompt = f"""
         你是一名严谨的计算化学家。你的任务是根据提供的【客观事实数据】撰写最终实验报告。
 
@@ -536,6 +569,8 @@ def final_analyzer_node(state: AgentState) -> dict:
         {data_str}
         ```
 
+        {diss_warning_context}
+
         **初始规划:**
         ```json
         {plan_str}
@@ -550,6 +585,10 @@ def final_analyzer_node(state: AgentState) -> dict:
             - **完美吸附**: 如果 `bond_change_count == 0`，请报告为“分子以完整构型稳定吸附”。
             - **异构化/重排**: 如果 `bond_change_count > 0` 但 `is_dissociated == False`，请特别强调：“吸附物在表面发生了 **分子内重排/异构化**（键变化数: {{bond_change_count}}），形成了更稳定的新构型。”这应被视为一个重要的化学发现。
             - **解离**: 如果 `is_dissociated == True`，请报告为“吸附物发生了解离”。
+        6. **科学完整性与热力学警告 (至关重要):**
+            - 如果提供了【严重热力学警告数据】，你必须在报告的“结论”或“讨论”部分以醒目的方式指出：
+              “尽管找到了稳定的分子吸附态，但计算显示该分子在该表面发生解离在热力学上更有利（能量低 X eV）。因此，报告的构型可能仅在动力学上稳定（亚稳态）。”
+            - 严禁隐瞒这一事实，这关乎科学诚信。
         """
     else:
         fail_reason = last_analysis.get("message", "未找到稳定构型。")
@@ -611,12 +650,34 @@ def route_after_analysis(state: AgentState) -> str:
         
         # 2. [关键增强] 提取位点滑移信息
         # 这能告诉 Planner："你原本想去 Bridge，但实际去了 Hollow"
-        actual_site = analysis_data.get("site_analysis", {}).get("actual_site_type", "unknown")
-        planned_site = analysis_data.get("site_analysis", {}).get("planned_site_type", "unknown")
+        # 提取位点分析数据
+        site_info = analysis_data.get("site_analysis", {})
+        actual_site = site_info.get("actual_site_type", "unknown")
+        planned_site = site_info.get("planned_site_type", "unknown")
         
-        site_msg = f"位点: {actual_site}"
-        if actual_site != "unknown" and planned_site != "unknown" and actual_site != planned_site:
-            site_msg = f"⚠️位点滑移: {planned_site}->{actual_site}"
+        # 处理化学滑移
+        is_chem_slip = site_info.get("is_chemical_slip", False)
+        planned_syms = site_info.get("planned_symbols", [])
+        actual_syms = site_info.get("actual_symbols", [])
+
+        site_msg = f"位点: {actual_site} ({','.join(actual_syms)})"
+
+        # 强化滑移的负反馈
+        if is_chem_slip:
+            # 极其强烈地告知 Planner：原计划是失败/不稳定的
+            # 将 planned_syms 转为字符串，如 "Cu-Pd-Pd"
+            planned_str = "-".join(planned_syms)
+            actual_str = "-".join(actual_syms)
+            
+            site_msg = (
+                f"⚠️【不稳定位点警告】⚠️: "
+                f"规划的 {planned_site} ({planned_str}) 不稳定，吸附物自发滑移到了 {actual_site} ({actual_str})。"
+                f"这意味着 {planned_str} 对该吸附物亲和力不足，后续请**禁止**再次测试 {planned_str} 类位点！"
+            )
+        
+        elif actual_site != "unknown" and planned_site != "unknown" and actual_site != planned_site:
+            # 普通警告：只是几何变了 (如 hollow -> ontop，但原子没变)
+            site_msg = f"⚠️ 几何滑移: {planned_site} -> {actual_site}"
 
         # 3. 构建历史条目
         if status == "success":
@@ -689,6 +750,7 @@ def _prepare_initial_state(smiles: str, slab_path: str, user_request: str) -> Ag
         "analysis_json": None,
         "history": [],
         "best_result": None,
+        "best_dissociated_result": None,
         "attempted_keys": [],
         "available_sites_description": None
     }

@@ -470,10 +470,20 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
             AllChem.EmbedMolecule(mol_for_opt, AllChem.ETKDGv2())
             conf_ids = [0]
 
-        try:
-            AllChem.UFFOptimizeMoleculeConfs(mol_for_opt)
-        except Exception as e:
-            print(f"--- ⚠️ UFF 优化警告: {e} ---")
+        # 检查是否有带电荷的原子。如果有，UFF 力场可能会崩溃/报错，因此跳过 UFF。
+        has_charge = False
+        for atom in mol_for_opt.GetAtoms():
+            if atom.GetFormalCharge() != 0:
+                has_charge = True
+                break
+        
+        if has_charge:
+            print(f"--- 🛠️ _get_fragment: 检测到带电原子，跳过 UFF 预优化。 ---")
+        else:
+            try:
+                AllChem.UFFOptimizeMoleculeConfs(mol_for_opt)
+            except Exception as e:
+                print(f"--- ⚠️ UFF 优化警告: {e} ---")
         
         mol_with_hs.RemoveAllConformers()
         for i, cid in enumerate(conf_ids):
@@ -832,7 +842,7 @@ def populate_surface_with_fragment(
     # 对生成的构型进行碰撞检测和抬升 (阈值 1.8 Å)
     safe_out_trj = []
     for idx, atoms in enumerate(raw_out_trj):
-        safe_atoms = _bump_adsorbate_to_safe_distance(slab_atoms, atoms, min_dist_threshold=1.8)
+        safe_atoms = _bump_adsorbate_to_safe_distance(slab_atoms, atoms, min_dist_threshold=1.6)
         safe_out_trj.append(safe_atoms)
     
     out_trj = safe_out_trj
@@ -898,8 +908,8 @@ def relax_atoms(
         np.fill_diagonal(d_final, 99.0)
 
         bonds_initial = (d_initial < cutoff_mat) & (~mask)
-        # 宽松阈值检测断键 (1.3倍)
-        bonds_final_loose = (d_final < cutoff_mat * 1.3) & (~mask)
+        # 宽松阈值检测断键 (1.5倍)
+        bonds_final_loose = (d_final < cutoff_mat * 1.5) & (~mask)
         bonds_final_strict = (d_final < cutoff_mat) & (~mask)
 
         broken = bonds_initial & (~bonds_final_loose)
@@ -913,7 +923,8 @@ def relax_atoms(
         atoms.calc = calculator
         atoms.set_constraint(constraint)
         
-        if np.max(np.linalg.norm(atoms.get_forces(), axis=1)) > 500.0:
+        max_force = np.max(np.linalg.norm(atoms.get_forces(), axis=1))
+        if max_force > 500.0:
             print(f"--- ⚠️ 跳过结构 {i+1}: 初始力过大 (Max Force = {max_force:.2f} eV/A)... ---")
             continue
 
@@ -1061,6 +1072,12 @@ def analyze_relaxation_results(
         # 6. 获取键变化计数作为辅助参考
         bond_change_count = relaxed_atoms.info.get("bond_change_count", 0)
 
+        # 如果分子碎成了 n 块 (n > 1)，说明至少断了 (n-1) 个键。
+        # 防止出现 "is_dissociated=True" 但 "bond_change_count=0" 的矛盾。
+        if is_dissociated and bond_change_count == 0:
+            print(f"--- 🛠️ 修正逻辑矛盾: 检测到解离 (n_components={n_components}) 但 bond_change_count=0。强制修正。 ---")
+            bond_change_count = max(1, n_components - 1)
+
         # 7. 综合判定反应性
         if is_dissociated:
              # 只要碎了，就是反应/失败
@@ -1119,15 +1136,58 @@ def analyze_relaxation_results(
         elif actual_connectivity == 2: actual_site_type = "bridge"
         elif actual_connectivity >= 3: actual_site_type = "hollow"
         else: actual_site_type = "desorbed"
-        
-        print(f"--- 分析: 位点滑移检查：规划 {planned_site_type} (conn={planned_connectivity}), 实际 {actual_site_type} (conn={actual_connectivity}) ---")
 
-        # 2. 识别吸附物原子和表面原子
         slab_indices = list(range(len(slab_atoms)))
         adsorbate_indices = list(range(len(slab_atoms), len(relaxed_atoms)))
         
         slab_atoms_relaxed = relaxed_atoms[slab_indices]
         adsorbate_atoms_relaxed = relaxed_atoms[adsorbate_indices]
+
+        # FCC/HCP 晶体学辨识
+        # 只有当确认为 hollow 位点时，才进行深层探测
+        site_crystallography = ""
+        if actual_site_type == "hollow":
+            try:
+                # 1. 定义表面层和次表面层
+                # 假设 slab 在 Z 方向上是对齐的，且 z_max 是最上层
+                z_coords = slab_atoms_relaxed.positions[:, 2]
+                max_z = np.max(z_coords)
+                # 简单的层切分：认为距离顶层 1.5A 到 4.0A 之间的是次表面层 (Subsurface)
+                # 适用于大多数金属 (层间距 ~2.0-2.3A)
+                subsurface_mask = (z_coords < (max_z - 1.2)) & (z_coords > (max_z - 4.0))
+                subsurface_indices_list = np.where(subsurface_mask)[0]
+
+                if len(subsurface_indices_list) > 0:
+                    # 2. 获取目标吸附原子的 XY 坐标
+                    target_pos_xy = relaxed_atoms[target_atom_global_index].position[:2]
+                    
+                    # 3. 计算吸附原子与所有次表面原子在 XY 平面上的投影距离
+                    subsurface_positions_xy = slab_atoms_relaxed.positions[subsurface_indices_list][:, :2]
+                    
+                    # 考虑周期性边界条件 (PBC) 计算 XY 距离
+                    # 这里为了简化，我们假设原子正好在正下方，直接用欧氏距离通常足够，
+                    # 但更严谨的做法是使用 ase.geometry.get_distances 或者手动处理 cell
+                    # 这里使用简化的投影距离判定：
+                    # 如果次表面原子在 XY 上的距离 < 1.0 Å，说明正下方有原子 -> HCP
+                    dists_xy = np.linalg.norm(subsurface_positions_xy - target_pos_xy, axis=1)
+                    min_dist_xy = np.min(dists_xy)
+                    
+                    if min_dist_xy < 1.0:
+                        site_crystallography = "(HCP/Subsurf-Atom)"
+                    else:
+                        site_crystallography = "(FCC/No-Subsurf)"
+                else:
+                    site_crystallography = "(Unknown Layer)"
+            except Exception as e_cryst:
+                print(f"--- ⚠️ 晶体学分析警告: {e_cryst} ---")
+        
+        # 将此后缀添加到 actual_site_type 中，以便 Agent 能看到区别
+        if site_crystallography:
+            actual_site_type += f" {site_crystallography}"
+        
+        print(f"--- 分析: 位点滑移检查：规划 {planned_site_type} (conn={planned_connectivity}), 实际 {actual_site_type} (conn={actual_connectivity}) ---")
+
+        # 2. 识别吸附物原子和表面原子
         
         target_atom_global_index = -1
         target_atom_symbol = ""
@@ -1189,6 +1249,21 @@ def analyze_relaxation_results(
             nearest_radius_sum = cov_cutoffs[target_atom_global_index] + cov_cutoffs[nearest_slab_atom_global_index]
             estimated_covalent_cutoff_A = nearest_radius_sum * 1.1
 
+            # 化学滑移检测 (Chemical Slip Detection)
+            # 1. 获取规划的表面原子符号 (排序以忽略顺序差异)
+            planned_symbols = sorted(plan_solution.get("surface_binding_atoms", []))
+            
+            # 2. 获取实际成键的表面原子符号
+            actual_symbols = sorted([atom['symbol'] for atom in bonded_surface_atoms])
+            
+            # 3. 判定是否发生化学滑移
+            # 注意：如果规划是空的(如未指定)则跳过；如果没成键也跳过
+            is_chemical_slip = False
+            if planned_symbols and bonded_surface_atoms:
+                if planned_symbols != actual_symbols:
+                    is_chemical_slip = True
+                    print(f"--- ⚠️ 警告: 检测到化学位点滑移! 规划: {planned_symbols} -> 实际: {actual_symbols} ---")
+
             analysis_message = (
                 f"最稳定构型吸附能: {E_ads:.4f} eV。"
                 f"目标原子: {target_atom_symbol} (来自规划索引 {binding_atom_indices[0]}，在弛豫结构中为全局索引 {target_atom_global_index})。"
@@ -1196,6 +1271,7 @@ def analyze_relaxation_results(
                 f"成键表面原子: {bonded_desc}。 "
                 f"是否成键: {is_bound}。"
                 f"是否发生反应性转变: {reaction_detected} (键变化数: {bond_change_count} )。"
+                f"化学滑移: {is_chemical_slip} (规划 {planned_symbols} -> 实际 {actual_symbols})。"
             )
 
             result = {
@@ -1218,7 +1294,10 @@ def analyze_relaxation_results(
                     "planned_site_type": planned_site_type,
                     "planned_connectivity": planned_connectivity,
                     "actual_site_type": actual_site_type,
-                    "actual_connectivity": actual_connectivity
+                    "actual_connectivity": actual_connectivity,
+                    "is_chemical_slip": is_chemical_slip,
+                    "planned_symbols": planned_symbols,
+                    "actual_symbols": actual_symbols
                 }
             }
         
@@ -1276,7 +1355,8 @@ def analyze_relaxation_results(
                     # 判定成键
                     if d <= (r_ads + r_slab) * 1.1:
                         bonds.append({
-                            "adsorbate_atom": ads_symbol,
+                            "adsorbate_atom": f"{ads_symbol}({ads_idx})",
+                            "adsorbate_atom_index": int(ads_idx),
                             "symbol": relaxed_atoms[s_idx].symbol,
                             "index": int(s_idx),
                             "distance": round(d, 3)
@@ -1302,6 +1382,22 @@ def analyze_relaxation_results(
             else:
                 bonded_desc = "无"
 
+            # 化学滑移检测 (Chemical Slip Detection)
+            # 1. 获取规划的表面原子符号 (排序以忽略顺序差异)
+            planned_symbols = sorted(plan_solution.get("surface_binding_atoms", []))
+            
+            # 2. 获取实际成键的表面原子符号
+            actual_symbols = sorted([atom['symbol'] for atom in bonded_surface_atoms])
+            
+            # 3. 判定是否发生化学滑移
+            # 注意：如果规划是空的(如未指定)则跳过；如果没成键也跳过
+            is_chemical_slip = False
+            if planned_symbols and bonded_surface_atoms:
+                if planned_symbols != actual_symbols:
+                    is_chemical_slip = True
+                    print(f"--- ⚠️ 警告: 检测到化学位点滑移! 规划: {planned_symbols} -> 实际: {actual_symbols} ---")
+            # === 🩹 修复结束 ===
+
             analysis_message = (
                 f"最稳定构型吸附能: {E_ads:.4f} eV。"
                 f"目标原子 1: {target_atom_symbol} (来自规划索引 {binding_atom_indices[0]}，全局索引 {target_atom_global_index})。"
@@ -1311,6 +1407,7 @@ def analyze_relaxation_results(
                 f"成键表面原子: {bonded_desc}。 "
                 f"是否成键: {is_bound}。"
                 f"是否发生反应性转变: {reaction_detected} (键变化数: {bond_change_count} )。"
+                f"化学滑移: {is_chemical_slip} (规划 {planned_symbols} -> 实际 {actual_symbols})。"
             )
 
             result = {
@@ -1340,7 +1437,10 @@ def analyze_relaxation_results(
                     "planned_site_type": planned_site_type,
                     "planned_connectivity": planned_connectivity,
                     "actual_site_type": actual_site_type,
-                    "actual_connectivity": actual_connectivity
+                    "actual_connectivity": actual_connectivity,
+                    "is_chemical_slip": is_chemical_slip,
+                    "planned_symbols": planned_symbols,
+                    "actual_symbols": actual_symbols
                 }
             }
 
