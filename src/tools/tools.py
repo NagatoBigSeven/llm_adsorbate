@@ -10,7 +10,7 @@ def get_shrinkwrap_grid_fixed(
     slab,
     precision,
     drop_increment=0.1,
-    touch_sphere_size=3,
+    touch_sphere_size=2,
     marker="He",
     raster_speed_boost=False,
 ):
@@ -71,7 +71,7 @@ def get_shrinkwrap_grid_fixed(
 def get_shrinkwrap_ads_sites_fixed(
     atoms: Atoms,
     precision: float = 0.25,  # 默认精度从 0.5 提升到 0.25
-    touch_sphere_size: float = 3,
+    touch_sphere_size: float = 2,
     return_trj: bool = False,
     return_geometry = False
 ):
@@ -226,10 +226,16 @@ def get_atom_index_menu(original_smiles: str) -> str:
             raise ValueError(f"RDKit 无法解析 SMILES: {original_smiles}")
         atom_list = []
         for atom in mol.GetAtoms():
-            atom_list.append({
+            atom_info = {
                 "index": atom.GetIdx(),
-                "symbol": atom.GetSymbol()
-            })
+                "symbol": atom.GetSymbol(),
+                "hybridization": str(atom.GetHybridization()), 
+                "degree": atom.GetDegree(),
+                "radical_electrons": atom.GetNumRadicalElectrons(),
+                "formal_charge": atom.GetFormalCharge()
+            }
+            atom_list.append(atom_info)
+            
         heavy_atom_menu = [atom for atom in atom_list if atom["symbol"] != 'H']
         print(f"--- 🛠️ 重原子索引列表已生成: {json.dumps(heavy_atom_menu)} ---")
         return json.dumps(heavy_atom_menu, indent=2)
@@ -246,7 +252,7 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
     
     num_binding_indices = len(binding_atom_indices)
     
-    # --- end-on @ ontop ---
+    # --- 情况 A: end-on @ ontop (单点吸附) ---
     if site_type == "ontop":
         if num_binding_indices != 1:
             raise ValueError(f"'ontop' 位点需要 1 个键合索引，但提供了 {num_binding_indices} 个。")
@@ -256,117 +262,87 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
         if target_idx >= mol.GetNumAtoms():
              raise ValueError(f"索引 {target_idx} 超出范围 (分子原子数: {mol.GetNumAtoms()})。")
 
-        new_mol = Chem.RWMol()
+        # 1. 捕获原始状态 (防止 RDKit 自动推导)
+        target_atom_original = mol.GetAtomWithIdx(target_idx)
+        original_h_count = target_atom_original.GetTotalNumHs()
+        num_radicals = target_atom_original.GetNumRadicalElectrons()
+        # original_charge = target_atom_original.GetFormalCharge() # 不需要了，我们尽量保持电荷不变
 
-        # 1. 添加 Cl 标记 (索引 0)，并设置原子映射号为 1
+        new_mol = Chem.RWMol(mol)
+
+        # 2. 添加 Cl 标记
         marker_atom = Chem.Atom("Cl")
-        marker_atom.SetAtomMapNum(1) # [Cl:1]
-        marker_idx = new_mol.AddAtom(marker_atom) # index 0
+        marker_atom.SetAtomMapNum(1) 
+        marker_atom.SetIsotope(37)
+        marker_idx = new_mol.AddAtom(marker_atom)
         
-        # 2. 复制原始分子原子
-        idx_map = {}
-        for atom in mol.GetAtoms():
-            new_idx = new_mol.AddAtom(atom)
-            idx_map[atom.GetIdx()] = new_idx
-        
-        # 3. 复制所有原始键
-        for bond in mol.GetBonds():
-            new_mol.AddBond(idx_map[bond.GetBeginAtomIdx()], idx_map[bond.GetEndAtomIdx()], bond.GetBondType())
-        
-        # 4. 添加 Cl-Atom 键
-        new_mol.AddBond(marker_idx, idx_map[target_idx], Chem.rdchem.BondType.SINGLE)
-        
-        # 5. 调整电荷 (基于价电子数，区分共价键和配位键)
-        target_atom_obj = new_mol.GetAtomWithIdx(idx_map[target_idx])
-
-        # FIX: RDKit 可能会在 AddHs 或 Embed 过程中吞掉显式的 [H] 原子。
-        # 强制将其设为同位素 2 (氘)，RDKit 会将其视为重原子保留，
-        # 而 ASE 转换时 symbol 依然是 'H'，物理上无影响。
-        if target_atom_obj.GetSymbol() == 'H':
-            print(f"--- 🔬 检测到 H 原子吸附，应用同位素标记 [2H] 以防止 RDKit 吞噬... ---")
-            target_atom_obj.SetIsotope(2)
-
-        # 从 RDKit 获取化学原理
-        atomic_num = target_atom_obj.GetAtomicNum()
-        charge = target_atom_obj.GetFormalCharge()
-        pt = Chem.GetPeriodicTable()
-        
-        # 使用 *正确* 的 RDKit API: GetNOuterElecs (获取外层/价电子数)
-        n_outer_elecs = pt.GetNOuterElecs(atomic_num)
-
-        # 特例：一氧化碳 ([C-]#[O+])，C[0] (4价电子) 但 charge = -1
-        is_carbon_monoxide_case = (n_outer_elecs == 4 and charge == -1)
-
-        # “价电子数>4”逻辑：(N, O, S, Se...) 
-        # 并且它们是中性或负电性的（即它们有孤对电子可以给出）
-        has_lone_pair_to_donate = (n_outer_elecs > 4 and charge <= 0)
-
-        if has_lone_pair_to_donate or is_carbon_monoxide_case:
-            # --- 模拟配位键 (Dative Bond) ---
-            # (N, O, S, Se... 或 N- 或 C-)
-            # 增加电荷以释放孤对电子用于成键
-            print(f"--- 🔬 (价电子: {n_outer_elecs}) 正在为配位原子 {target_atom_obj.GetSymbol()} (Charge={charge}) 应用 +1 电荷调整... ---")
-            target_atom_obj.SetFormalCharge(charge + 1)
+        # 3. [核心修复] 根据电子态决定键类型
+        if num_radicals > 0:
+            print(f"--- 🔬 智能成键: 检测到自由基 (N={num_radicals}) -> 使用共价单键 (SINGLE) ---")
+            # 策略：自由基形成共价键，物理意义明确，几何稳定
+            new_mol.AddBond(marker_idx, target_idx, Chem.rdchem.BondType.SINGLE)
+            
+            # 修正：消除自由基标记，使其成为饱和原子
+            target_atom_obj = new_mol.GetAtomWithIdx(target_idx)
+            target_atom_obj.SetNumRadicalElectrons(0)
+            
         else:
-            # --- 模拟共价键 (Covalent Bond) ---
-            # (C, B, Si... 或 [O+] 等已氧化的原子)
-            # 不调整电荷，让 Chem.AddHs 自动少加一个H
-            print(f"--- 🔬 (价电子: {n_outer_elecs}) 正在为共价原子 {target_atom_obj.GetSymbol()} (Charge={charge}) 保留原始电荷... ---")
+            print(f"--- 🔬 智能成键: 检测到孤对电子 (饱和/双键) -> 使用配位键 (DATIVE: Target->Surf) ---")
+            # 策略：使用配位键连接。
+            # 关键点1：方向必须是 目标原子 -> 标记原子 (Target Donates to Marker)
+            # 关键点2：不增加电荷，不改变价态。RDKit 不计算 Dative 键的价态贡献，因此 C=O 不会报错。
+            new_mol.AddBond(target_idx, marker_idx, Chem.rdchem.BondType.DATIVE)
+            
+            target_atom_obj = new_mol.GetAtomWithIdx(target_idx)
 
-        # 6. 为我们关心的*成键原子*添加唯一的跟踪器
+        # 4. [安全锁] 绝对锁定氢原子
+        # 无论哪种情况，都严禁 RDKit 自动添加或删除氢原子
+        target_atom_obj.SetNumExplicitHs(original_h_count)
+        target_atom_obj.SetNoImplicit(True)
+
+        # 5. 标记追踪
         target_atom_obj.SetAtomMapNum(114514)
+        if target_atom_obj.GetSymbol() != 'H':
+            target_atom_obj.SetIsotope(14) 
+
+        # 6. 强制刷新
+        try:
+            # Catch errors just in case, but DATIVE + Neutral usually passes
+            Chem.SanitizeMol(new_mol)
+        except Exception as e:
+            print(f"--- ⚠️ Sanitize 警告: {e} ---")
 
         out_smiles = Chem.MolToSmiles(new_mol.GetMol(), canonical=False, rootedAtAtom=marker_idx)
-        # RDKit 现在会生成类似 "[Cl:1][C:114514]#O" 的SMILES
-        print(f"--- 🔬 SMILES 翻译器输出: {out_smiles} ---")
+        print(f"--- 🔬 SMILES 翻译器最终输出: {out_smiles} ---")
         return out_smiles
 
-    # --- 逻辑 2 & 3: end-on/side-on @ bridge/hollow ---
+    # --- 情况 B & C: bridge/hollow (保持原样) ---
     elif site_type in ["bridge", "hollow"]:
         if num_binding_indices == 1:
-            # --- end-on @ bridge/hollow ---
             target_idx = binding_atom_indices[0]
-            if target_idx >= mol.GetNumAtoms():
-                 raise ValueError(f"索引 {target_idx} 超出范围 (分子原子数: {mol.GetNumAtoms()})。")
-
+            if target_idx >= mol.GetNumAtoms(): raise ValueError(f"索引 {target_idx} 超出范围。")
             rw_mol = Chem.RWMol(mol)
-            atom1 = rw_mol.GetAtomWithIdx(target_idx)
-            atom1.SetAtomMapNum(114514)
-
+            rw_mol.GetAtomWithIdx(target_idx).SetAtomMapNum(114514)
             original_smiles_mapped = Chem.MolToSmiles(rw_mol.GetMol(), canonical=False)
-
-            # 使用“点运算符”来欺骗 RDKit 加氢
             out_smiles = f"{original_smiles_mapped}.[S:1].[S:2]"
             print(f"--- 🔬 SMILES 翻译器输出: {out_smiles} ---")
             return out_smiles
 
         elif num_binding_indices == 2:
-            # --- side-on @ bridge/hollow ---
             target_indices = sorted(binding_atom_indices)
             idx1, idx2 = target_indices[0], target_indices[1]
-
-            if idx2 >= mol.GetNumAtoms():
-                 raise ValueError(f"索引 {idx2} 超出范围 (分子原子数: {mol.GetNumAtoms()})。")
-
+            if idx2 >= mol.GetNumAtoms(): raise ValueError(f"索引 {idx2} 超出范围。")
             rw_mol = Chem.RWMol(mol)
-            atom1 = rw_mol.GetAtomWithIdx(idx1)
-            atom2 = rw_mol.GetAtomWithIdx(idx2)
-
-            atom1.SetAtomMapNum(114514) # 跟踪器 1
-            atom2.SetAtomMapNum(1919810) # 跟踪器 2
-
+            rw_mol.GetAtomWithIdx(idx1).SetAtomMapNum(114514)
+            rw_mol.GetAtomWithIdx(idx2).SetAtomMapNum(1919810)
             original_smiles_mapped = Chem.MolToSmiles(rw_mol.GetMol(), canonical=False)
-
-            # 使用“点运算符”来欺骗 RDKit 加氢
             out_smiles = f"{original_smiles_mapped}.[S:1].[S:2]"
             print(f"--- 🔬 SMILES 翻译器输出: {out_smiles} ---")
             return out_smiles
-
         else:
             raise ValueError(f"'{site_type}' 位点不支持 {num_binding_indices} 个键合索引。")
-
     else:
-        raise ValueError(f"未知的 site_type: {site_type}。必须是 'ontop', 'bridge' 或 'hollow'。")
+        raise ValueError(f"未知的 site_type: {site_type}。")
 
 def read_atoms_object(slab_path: str) -> ase.Atoms:
     try:
@@ -416,7 +392,7 @@ def analyze_surface_sites(slab_path: str) -> dict:
     clean_slab, _ = prepare_slab(atoms)
     
     # 空跑 Autoadsorbate
-    s = Surface(clean_slab, precision=1.0, touch_sphere_size=3.0, mode='slab')
+    s = Surface(clean_slab, precision=1.0, touch_sphere_size=2.0, mode='slab')
     s.sym_reduce()
     
     site_inventory = defaultdict(set)
@@ -428,6 +404,13 @@ def analyze_surface_sites(slab_path: str) -> dict:
             elements.extend([el] * count)
         site_desc = "-".join(sorted(elements))
         site_inventory[conn].add(site_desc)
+    
+    # 修复 FCC(100) 等正方形晶格上的虚构 3-fold 位点
+    # 逻辑：如果一个表面同时拥有 4-fold (connectivity=4) 和 3-fold (connectivity=3)，
+    # 且没有极其复杂的低对称性特征，通常 3-fold 是三角剖分的伪影。
+    if 4 in site_inventory and 3 in site_inventory:
+        print("--- 🛠️ 晶体学修正: 检测到 Hollow-4 位点，自动过滤几何伪影 Hollow-3 位点。 ---")
+        del site_inventory[3]
 
     desc_list = []
     conn_map = {1: "Ontop", 2: "Bridge", 3: "Hollow-3", 4: "Hollow-4"}
@@ -459,16 +442,34 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
         mol_for_opt = Chem.Mol(mol_with_hs)
         for atom in mol_for_opt.GetAtoms():
             atom.SetFormalCharge(0)
+            atom.SetNumRadicalElectrons(0) 
+            atom.SetIsotope(0)
+            atom.SetHybridization(Chem.rdchem.HybridizationType.UNSPECIFIED)
+        
+        try:
+            Chem.SanitizeMol(mol_for_opt)
+        except Exception as e:
+            print(f"--- ⚠️ Sanitize 警告: {e} ---")
 
         params = AllChem.ETKDGv3()
         params.randomSeed = 0xF00D
         params.pruneRmsThresh = 0.5
         params.numThreads = 0
+        
         conf_ids = list(AllChem.EmbedMultipleConfs(mol_for_opt, numConfs=to_initialize, params=params))
         
         if not conf_ids:
+            print("--- ⚠️ ETKDGv3 生成失败，尝试 ETKDGv2 ... ---")
             AllChem.EmbedMolecule(mol_for_opt, AllChem.ETKDGv2())
-            conf_ids = [0]
+            if mol_for_opt.GetNumConformers() > 0:
+                conf_ids = [0]
+        
+        if not conf_ids:
+            print("--- ⚠️ ETKDG 系列均失败，尝试随机坐标 (Random Coords) ... ---")
+            # 对于极其不合理的强行配位结构，随机坐标通常能生成“至少一个”可用的几何
+            params_rand = AllChem.ETKDGv3()
+            params_rand.useRandomCoords = True
+            conf_ids = list(AllChem.EmbedMultipleConfs(mol_for_opt, numConfs=1, params=params_rand))
 
         # 检查是否有带电荷的原子。如果有，UFF 力场可能会崩溃/报错，因此跳过 UFF。
         has_charge = False
@@ -498,13 +499,24 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
             conf = mol_with_hs.GetConformer(conf_id)
             positions = conf.GetPositions()
             
-            # 1. 查找所有映射的原子
+            # 1. 查找所有映射的原子 (增加同位素双重保险)
             map_num_to_idx = {}
             for atom in all_rdkit_atoms:
                 map_num = atom.GetAtomMapNum()
                 idx = atom.GetIdx()
+                iso = atom.GetIsotope()
+                
+                # 优先使用 Map Number
                 if map_num > 0:
                     map_num_to_idx[map_num] = idx
+                
+                # === [锚点生效] 如果 Map 丢了，用同位素找回 ===
+                if iso == 37: 
+                    # 37Cl 是我们的标记
+                    map_num_to_idx[1] = idx
+                if iso == 14: 
+                    # 14C (或同位素14的原子) 是我们的目标
+                    map_num_to_idx[114514] = idx
             
             # 2. 根据 TRICK_SMILES 和 num_binding_indices 构建索引列表
             proxy_indices = []
@@ -731,10 +743,15 @@ def populate_surface_with_fragment(
         raise ValueError("Fragment 对象缺少 'plan_site_type' 信息。")
 
     # --- 从规划中读取参数 (或使用默认值) ---
-    site_type = plan_solution.get("site_type", "all")
-    conformers_per_site_cap = plan_solution.get("conformers_per_site_cap", 2)
+    raw_site_type = plan_solution.get("site_type", "all")
+    # 强制归一化：将 "hollow-3", "hollow-4" 统一修正为 "hollow"
+    if raw_site_type.lower().startswith("hollow"):
+        site_type = "hollow"
+    else:
+        site_type = raw_site_type
+    conformers_per_site_cap = plan_solution.get("conformers_per_site_cap", 4)
     overlap_thr = plan_solution.get("overlap_thr", 0.1)
-    touch_sphere_size = plan_solution.get("touch_sphere_size", 3)
+    touch_sphere_size = plan_solution.get("touch_sphere_size", 2)
 
     print(f"--- 🛠️ 正在初始化表面 (touch_sphere_size={touch_sphere_size})... ---")
     
@@ -838,6 +855,16 @@ def populate_surface_with_fragment(
       overlap_thr=overlap_thr,
       verbose=True
     )
+
+    # 针对 Bridge 和 Hollow 位点，预先抬升 0.5 Å
+    # 原因：autoadsorbate 默认生成的初始距离对于大分子或多位点吸附往往太近，导致频繁触发碰撞修正。
+    if site_type in ["bridge", "hollow"]:
+        print(f"--- 🛠️ 几何优化: 为 {site_type} 位点预抬升吸附物 0.5 Å 以减少碰撞... ---")
+        for atoms in raw_out_trj:
+            # 找到吸附物原子的索引 (假设最后加入的是吸附物)
+            n_slab = len(slab_atoms)
+            atoms.positions[n_slab:, 2] += 0.5
+    
     
     # 对生成的构型进行碰撞检测和抬升 (阈值 1.8 Å)
     safe_out_trj = []
@@ -895,7 +922,7 @@ def relax_atoms(
     def _get_bond_change_count(initial, final):
         if len(initial) != len(final):
             return 0
-        radii = np.array(natural_cutoffs(initial, mult=1.05))
+        radii = np.array(natural_cutoffs(initial, mult=1.25))
         cutoff_mat = radii[:, None] + radii[None, :]
         d_initial = initial.get_all_distances()
         d_final = final.get_all_distances()
@@ -1026,7 +1053,12 @@ def analyze_relaxation_results(
 ) -> str:
     try:
         print(f"--- 🛠️ 正在分析弛豫结果: {relaxed_trajectory_file} ---")
-        traj = read(relaxed_trajectory_file, index=":")
+
+        try:
+            traj = read(relaxed_trajectory_file, index=":")
+        except Exception as e_read:
+            return json.dumps({"status": "error", "message": f"无法读取轨迹文件 (可能是文件损坏): {e_read}"})
+        
         if len(traj) == 0:
             return json.dumps({"status": "error", "message": "弛豫轨迹为空或无法读取。"})
 
@@ -1046,6 +1078,19 @@ def analyze_relaxation_results(
         E_ads = min_energy_total - e_surface_ref - e_adsorbate_ref
         print(f"--- Analysis: E_ads = {E_ads:.4f} eV (E_total = {min_energy_total:.4f} eV, E_surf={e_surface_ref:.4f}, E_ads_mol={e_adsorbate_ref:.4f}) ---")
         
+        # 1. 定义智能判定函数 (移动到最前方，供全局复用)
+        # 针对 Float32 精度和金属吸附特性，将基础容忍度从 1.25 提升至 1.3
+        def check_bonding_smart(atom_idx_1, atom_idx_2, r1, r2, current_energy_eV):
+            base_mult = 1.30 # 基础键长容忍度
+            
+            # 能量辅助判定: 如果能量极低 (< -0.5 eV)，说明必然有强相互作用，放宽几何判定
+            if current_energy_eV < -0.5:
+                base_mult = 1.45 # 即使几何略微拉伸，只要能量很低，就算成键
+            
+            d = relaxed_atoms.get_distance(atom_idx_1, atom_idx_2, mic=True)
+            threshold = (r1 + r2) * base_mult
+            return d <= threshold, d, threshold
+
         # 1. 提取吸附物原子
         adsorbate_atoms = relaxed_atoms[len(slab_atoms):]
 
@@ -1056,9 +1101,9 @@ def analyze_relaxation_results(
         check_atoms.set_pbc(relaxed_atoms.get_pbc())
 
         # 3. 构建邻接矩阵 (考虑 PBC)
-        # mult=1.2 给键长一点裕度 (C-H ~1.1A -> cutoff ~1.3A)
+        # mult=1.25 给键长一点裕度 (C-H ~1.1A -> cutoff ~1.3A)
         # 如果距离超过这个范围，那就是真的断了
-        check_cutoffs = natural_cutoffs(check_atoms, mult=1.2)
+        check_cutoffs = natural_cutoffs(check_atoms, mult=1.25)
         nl = build_neighbor_list(check_atoms, cutoffs=check_cutoffs, self_interaction=False)
         adjacency_matrix = nl.get_connectivity_matrix()
 
@@ -1079,16 +1124,16 @@ def analyze_relaxation_results(
             bond_change_count = max(1, n_components - 1)
 
         # 7. 综合判定反应性
+        reaction_detected = False
         if is_dissociated:
-             # 只要碎了，就是反应/失败
+             # 保留真实的 bond_change_count > 0，这代表异构化
              reaction_detected = True
         elif bond_change_count > 0:
-             # 没碎，但是键变了 -> 这是“内反应/异构化”
-             # 我们可以标记为 reaction_detected = True，
-             # 但在 Agent 的 route_after_analysis 中，你可以选择是否“宽容”处理这种情况
+             # 键变了但没碎 -> 异构化 (Isomerization)
+             # 我们标记 reaction_detected = True，让 Agent 决定这是否是坏事
              reaction_detected = True
         else:
-             # 没碎，键也没变 -> 完美的分子吸附
+             # 键没变，分子也没碎 -> 完美的分子吸附
              reaction_detected = False
 
         # --- 从 plan_dict 检索信息 ---
@@ -1113,21 +1158,18 @@ def analyze_relaxation_results(
         
         actual_bonded_slab_indices = set()
         anchor_atom_indices = []
-        
-        if num_binding_indices == 1:
+        if num_binding_indices == 1 and len(adsorbate_indices_check) > 0:
             anchor_atom_indices = [adsorbate_indices_check[0]]
-        elif num_binding_indices == 2:
-            if len(adsorbate_indices_check) >= 2:
-                anchor_atom_indices = [adsorbate_indices_check[0], adsorbate_indices_check[1]]
+        elif num_binding_indices == 2 and len(adsorbate_indices_check) >= 2:
+            anchor_atom_indices = [adsorbate_indices_check[0], adsorbate_indices_check[1]]
         
         # 1.3. 计算实际成键的表面原子数量
         for anchor_idx in anchor_atom_indices:
-            anchor_cutoff = cov_cutoffs_check[anchor_idx]
+            r_ads = cov_cutoffs_check[anchor_idx]
             for slab_idx in slab_indices_check:
-                slab_cutoff = cov_cutoffs_check[slab_idx]
-                bonding_cutoff_check = (anchor_cutoff + slab_cutoff) * 1.1
-                dist = relaxed_atoms.get_distance(anchor_idx, slab_idx, mic=True) # 确保使用 MIC
-                if dist <= bonding_cutoff_check:
+                r_slab = cov_cutoffs_check[slab_idx]
+                is_connected, _, _ = check_bonding_smart(anchor_idx, slab_idx, r_ads, r_slab, E_ads)
+                if is_connected:
                     actual_bonded_slab_indices.add(slab_idx)
         
         actual_connectivity = len(actual_bonded_slab_indices)
@@ -1137,11 +1179,22 @@ def analyze_relaxation_results(
         elif actual_connectivity >= 3: actual_site_type = "hollow"
         else: actual_site_type = "desorbed"
 
+        # 物理一致性强制修正 (Sanity Check)
+        # 如果能量很低 (强吸附)，但几何判定为 desorbed，这一定是几何判据太严，强制修正为 chemisorbed
+        if actual_site_type == "desorbed" and E_ads < -0.5:
+            print(f"--- 🛠️ 物理修正: 检测到强吸附能 ({E_ads:.2f} eV) 但几何判定为脱附。强制修正为 'hollow/promiscuous'。 ---")
+            actual_site_type = "hollow (inferred)"
+            # 保持 actual_connectivity 为 0 或手动设为 3，防止 Agent 困惑
+            if actual_connectivity == 0: actual_connectivity = 3
+
         slab_indices = list(range(len(slab_atoms)))
         adsorbate_indices = list(range(len(slab_atoms), len(relaxed_atoms)))
         
         slab_atoms_relaxed = relaxed_atoms[slab_indices]
         adsorbate_atoms_relaxed = relaxed_atoms[adsorbate_indices]
+
+        # 我们默认取吸附物列表中的第一个原子作为晶体学探测的锚点
+        target_atom_global_index = adsorbate_indices[0] if len(adsorbate_indices) > 0 else -1
 
         # FCC/HCP 晶体学辨识
         # 只有当确认为 hollow 位点时，才进行深层探测
@@ -1211,23 +1264,24 @@ def analyze_relaxation_results(
             nearest_slab_atom_symbol = ""
             nearest_slab_atom_global_index = -1
             
-            # 遍历所有表面原子计算距离
+            # 遍历所有表面原子
             for s_idx in slab_indices:
-                # 使用 MIC (最小镜像约定) 计算距离，确保周期性边界下距离正确
-                d = relaxed_atoms.get_distance(target_atom_global_index, s_idx, mic=True)
+                r_ads = cov_cutoffs_check[target_atom_global_index]
+                r_slab = cov_cutoffs_check[s_idx]
                 
-                # 更新最近原子记录 (作为备用信息)
+                # 使用智能判定
+                is_connected, d, threshold = check_bonding_smart(
+                    target_atom_global_index, s_idx, r_ads, r_slab, E_ads
+                )
+                
                 if d < min_distance:
                     min_distance = d
                     nearest_slab_atom_global_index = s_idx
                     nearest_slab_atom_symbol = relaxed_atoms[s_idx].symbol
-                
-                # 检查是否成键
-                r_ads = cov_cutoffs[target_atom_global_index]
-                r_slab = cov_cutoffs[s_idx]
-                bonding_cutoff = (r_ads + r_slab) * 1.1 
-                
-                if d <= bonding_cutoff:
+                    # 动态更新阈值用于报告
+                    bonding_cutoff = threshold 
+
+                if is_connected:
                     bonded_surface_atoms.append({
                         "symbol": relaxed_atoms[s_idx].symbol,
                         "index": s_idx,
@@ -1236,6 +1290,11 @@ def analyze_relaxation_results(
             
             # 按距离排序，让最近的排前面
             bonded_surface_atoms.sort(key=lambda x: x["distance"])
+
+            # 生成带原子索引的唯一位点指纹 (Site Fingerprint)
+            # 这能区分 "Ru-Ru Bridge near Mo" 和 "Ru-Ru Bridge far from Mo"
+            bonded_indices = sorted([item['index'] for item in bonded_surface_atoms])
+            site_fingerprint = "-".join([f"{item['symbol']}{item['index']}" for item in bonded_surface_atoms])
             
             is_bound = len(bonded_surface_atoms) > 0
             
@@ -1297,7 +1356,8 @@ def analyze_relaxation_results(
                     "actual_connectivity": actual_connectivity,
                     "is_chemical_slip": is_chemical_slip,
                     "planned_symbols": planned_symbols,
-                    "actual_symbols": actual_symbols
+                    "actual_symbols": actual_symbols,
+                    "site_fingerprint": site_fingerprint
                 }
             }
         
@@ -1347,13 +1407,14 @@ def analyze_relaxation_results(
             # 定义辅助函数：查找某个吸附原子的所有成键对象
             def find_bonds(ads_idx, ads_symbol):
                 bonds = []
-                r_ads = cov_cutoffs[ads_idx]
+                r_ads = cov_cutoffs_check[ads_idx]
                 for s_idx in slab_indices:
-                    # 使用 MIC (最小镜像约定) 计算距离
-                    d = relaxed_atoms.get_distance(ads_idx, s_idx, mic=True)
-                    r_slab = cov_cutoffs[s_idx]
+                    r_slab = cov_cutoffs_check[s_idx]
+                    is_connected, d, _ = check_bonding_smart(
+                        ads_idx, s_idx, r_ads, r_slab, E_ads
+                    )
                     # 判定成键
-                    if d <= (r_ads + r_slab) * 1.1:
+                    if is_connected:
                         bonds.append({
                             "adsorbate_atom": f"{ads_symbol}({ads_idx})",
                             "adsorbate_atom_index": int(ads_idx),
@@ -1369,6 +1430,11 @@ def analyze_relaxation_results(
             
             # 按距离排序
             bonded_surface_atoms.sort(key=lambda x: x["distance"])
+
+            # 生成带原子索引的唯一位点指纹 (Site Fingerprint)
+            # 这能区分 "Ru-Ru Bridge near Mo" 和 "Ru-Ru Bridge far from Mo"
+            bonded_indices = sorted([item['index'] for item in bonded_surface_atoms])
+            site_fingerprint = "-".join([f"{item['symbol']}{item['index']}" for item in bonded_surface_atoms])
 
             # 计算最终的最短键长 (用于报告)
             if bonded_surface_atoms:
@@ -1440,7 +1506,8 @@ def analyze_relaxation_results(
                     "actual_connectivity": actual_connectivity,
                     "is_chemical_slip": is_chemical_slip,
                     "planned_symbols": planned_symbols,
-                    "actual_symbols": actual_symbols
+                    "actual_symbols": actual_symbols,
+                    "site_fingerprint": site_fingerprint
                 }
             }
 
@@ -1459,6 +1526,8 @@ def analyze_relaxation_results(
         if is_dissociated: site_label += "_DISS"
         elif bond_change_count > 0: site_label += "_ISO"
         
+        site_label = site_label.replace(" ", "_").replace("/", "-").replace("(", "").replace(")", "")
+
         clean_smiles = original_smiles.replace('=', '_').replace('#', '_').replace('[', '').replace(']', '')
         best_atoms_filename = f"outputs/BEST_{clean_smiles}_{site_label}_E{E_ads:.3f}.xyz"
         

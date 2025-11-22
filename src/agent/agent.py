@@ -89,7 +89,7 @@ def make_plan_key(plan_json: Optional[dict]) -> Optional[str]:
         site_type = solution.get("site_type", "") or ""
         surf_atoms = solution.get("surface_binding_atoms", []) or []
         ads_indices = solution.get("adsorbate_binding_indices", []) or []
-        touch_sphere = solution.get("touch_sphere_size", 3)
+        touch_sphere = solution.get("touch_sphere_size", 2)
         ads_type = plan_json.get("adsorbate_type", "Molecule")
 
         # 确保两者是 list，否则返回 None（不抛异常）
@@ -100,7 +100,7 @@ def make_plan_key(plan_json: Optional[dict]) -> Optional[str]:
         surf_atoms_str = ",".join(str(s) for s in surf_atoms)
         ads_indices_str = ",".join(str(i) for i in ads_indices)
 
-        key = f"{site_type}|{surf_atoms_str}|{ads_indices_str}|{ads_type}|{touch_sphere}"
+        key = f"{site_type}|{surf_atoms_str}|{ads_indices_str}|{ads_type}|{float(touch_sphere):.1f}"
         return key
     except Exception as e:
         print(f"--- ⚠️ make_plan_key 失败: {e} ---")
@@ -363,7 +363,7 @@ def tool_executor_node(state: AgentState) -> dict:
             original_smiles=state["smiles"],
             binding_atom_indices=plan_solution.get("adsorbate_binding_indices"),
             plan_dict=plan_json,
-            to_initialize=plan_solution.get("conformers_per_site_cap", 5)
+            to_initialize=plan_solution.get("conformers_per_site_cap", 4)
         )
         tool_logs.append(f"Success: Created fragment object from plan (SMILES: {state['smiles']}).")
 
@@ -557,11 +557,12 @@ def final_analyzer_node(state: AgentState) -> dict:
         final_prompt = f"""
         你是一名严谨的计算化学家。你的任务是根据提供的【客观事实数据】撰写最终实验报告。
 
-        !!! 严重警告 !!!
-        你必须 **严格忠实** 于以下 JSON 数据。
-        - **严禁编造** 任何数字。
-        - **严禁编造** 吸附位点名称（以 `actual_site_type` 为准）。
-        
+        !!! 严重警告与科学标准 !!!
+        1. **精度判定**: 由于硬件限制，计算使用 float32 精度。能量差 < 0.05 eV 可能是因为 **"数值噪声"** 或 **"能量简并"**。如果发现次优位点与最优位点能量差在此范围内，必须在报告中声明它们在室温下具有竞争性，**严禁**武断地宣称其中一个是唯一的绝对最优。
+        2. **标签纠错**: 工具可能会根据几何距离错误地将高配位吸附（Hollow）标记为 "desorbed"。
+        3. **异质性判定**: 对于合金表面（如 Ru3Mo），同一种类位点（如 Bridge Ru-Ru）可能存在多种环境。如果历史记录显示两次尝试 Bridge 位点的结果不同，请在讨论中指出这是由 **"表面异质性"** 导致的。
+        4. **严禁编造**: 严格基于 JSON 数据。
+
         **用户请求:** {state['user_request']}
 
         **最佳吸附构型数据:**
@@ -577,18 +578,13 @@ def final_analyzer_node(state: AgentState) -> dict:
         ```
 
         **撰写要求:**
-        1.  **结论:** 直接回答用户请求。
+        1.  **结论:** 直接回答用户请求。如果存在能量简并 (<0.05 eV)，请务必说明存在多个竞争构型。
         2.  **数据支撑:** 列出 `most_stable_energy_eV` (保留3位小数) 和 `final_bond_distance_A`。
-        3.  **几何细节:** 描述 `bonded_surface_atoms` 中的原子和距离。
-        4.  **位点纠正:** 如果 `actual_site_type` 与 `planned_site_type` 不符，明确指出发生了“位点滑移”。
-        5.  **化学状态判定 (重要):** 请检查 JSON 中的 `bond_change_count` 和 `reaction_detected` 字段：
-            - **完美吸附**: 如果 `bond_change_count == 0`，请报告为“分子以完整构型稳定吸附”。
-            - **异构化/重排**: 如果 `bond_change_count > 0` 但 `is_dissociated == False`，请特别强调：“吸附物在表面发生了 **分子内重排/异构化**（键变化数: {{bond_change_count}}），形成了更稳定的新构型。”这应被视为一个重要的化学发现。
-            - **解离**: 如果 `is_dissociated == True`，请报告为“吸附物发生了解离”。
-        6. **科学完整性与热力学警告 (至关重要):**
-            - 如果提供了【严重热力学警告数据】，你必须在报告的“结论”或“讨论”部分以醒目的方式指出：
-              “尽管找到了稳定的分子吸附态，但计算显示该分子在该表面发生解离在热力学上更有利（能量低 X eV）。因此，报告的构型可能仅在动力学上稳定（亚稳态）。”
-            - 严禁隐瞒这一事实，这关乎科学诚信。
+        3.  **几何细节:** 描述 `bonded_surface_atoms`，并明确提及具体的原子索引（如 Ru #41），以体现位点的唯一性。
+        4.  **位点纠正与滑移:** 描述是否发生了从 `planned_site_type` 到 `actual_site_type` 的滑移。
+        5.  **化学状态判定:** - **完美吸附**: `bond_change_count == 0`
+            - **异构化/重排**: `bond_change_count > 0` 但未解离
+            - **解离**: `is_dissociated == True`
         """
     else:
         fail_reason = last_analysis.get("message", "未找到稳定构型。")
@@ -626,9 +622,16 @@ def route_after_validation(state: AgentState) -> str:
 def route_after_analysis(state: AgentState) -> str:
     """
     简化的路由器：生成富含信息的历史记录，并决定下一步方向。
-    注意：不要在此处更新 state["best_result"]，该操作已在 tool_executor 中完成。
     """
     print("--- 🤔 Python 决策分支 3 (分析器) ---")
+
+    # 1. 优先检查：如果上一轮 Planner 已经决定终止，且我们刚跑完 Final Analyzer，
+    #    那么现在必须彻底结束流程。
+    plan_solution = state.get("plan", {}).get("solution", {})
+    if plan_solution.get("action") == "terminate":
+        print("--- 决策: 检测到终止信号 (Terminate Action)，流程正常结束。 ---")
+        return "end"
+
     current_history = state.get("history", [])
     
     try:
@@ -648,9 +651,7 @@ def route_after_analysis(state: AgentState) -> str:
         bond_change = analysis_data.get("bond_change_count", 0)
         is_dissociated = analysis_data.get("is_dissociated", False)
         
-        # 2. [关键增强] 提取位点滑移信息
-        # 这能告诉 Planner："你原本想去 Bridge，但实际去了 Hollow"
-        # 提取位点分析数据
+        # 2. 提取位点滑移信息
         site_info = analysis_data.get("site_analysis", {})
         actual_site = site_info.get("actual_site_type", "unknown")
         planned_site = site_info.get("planned_site_type", "unknown")
@@ -660,26 +661,46 @@ def route_after_analysis(state: AgentState) -> str:
         planned_syms = site_info.get("planned_symbols", [])
         actual_syms = site_info.get("actual_symbols", [])
 
+        # --- 定义基础 site_msg ---
         site_msg = f"位点: {actual_site} ({','.join(actual_syms)})"
 
         # 强化滑移的负反馈
         if is_chem_slip:
-            # 极其强烈地告知 Planner：原计划是失败/不稳定的
-            # 将 planned_syms 转为字符串，如 "Cu-Pd-Pd"
             planned_str = "-".join(planned_syms)
             actual_str = "-".join(actual_syms)
-            
             site_msg = (
                 f"⚠️【不稳定位点警告】⚠️: "
                 f"规划的 {planned_site} ({planned_str}) 不稳定，吸附物自发滑移到了 {actual_site} ({actual_str})。"
                 f"这意味着 {planned_str} 对该吸附物亲和力不足，后续请**禁止**再次测试 {planned_str} 类位点！"
             )
-        
         elif actual_site != "unknown" and planned_site != "unknown" and actual_site != planned_site:
-            # 普通警告：只是几何变了 (如 hollow -> ontop，但原子没变)
             site_msg = f"⚠️ 几何滑移: {planned_site} -> {actual_site}"
 
-        # 3. 构建历史条目
+        # --- 3. [修复逻辑] 智能区分“新最优”与“重复收敛” ---
+        tag = ""
+        best_res = state.get("best_result")
+        
+        if best_res and isinstance(energy, (int, float)):
+            best_e = best_res.get("most_stable_energy_eV", float('inf'))
+            
+            # 核心修复：检查当前运行是否就是创造 Best Result 的那个运行
+            # 我们通过比较 plan 对象来判断。best_result 中存储了产生它的 plan。
+            current_plan_obj = state.get("plan")
+            best_plan_obj = best_res.get("plan")
+            
+            # 如果当前 Plan 就是 Best Plan，说明这是“新纪录”，不是“重复”
+            is_new_record = (current_plan_obj == best_plan_obj)
+            
+            if is_new_record:
+                tag = " [🌟 新最优]"
+            elif abs(energy - best_e) < 0.05: # 0.05 eV 误差范围内
+                # 既然不是新纪录，且能量又一样，那就是重复路径
+                tag = " [🔄 已收敛到已知最优态]"
+        
+        # 追加标签
+        site_msg = f"{site_msg}{tag}"
+
+        # 4. 构建历史条目
         if status == "success":
             if is_dissociated:
                 res_str = "❌ 分子解离"
@@ -705,7 +726,7 @@ def route_after_analysis(state: AgentState) -> str:
     # 更新历史记录
     state["history"] = current_history
 
-    # 4. 决策逻辑
+    # 5. 决策逻辑
     if len(current_history) >= MAX_RETRIES:
         print(f"--- 决策: 已达到 {len(current_history)} 次尝试上限。流程结束。 ---")
         return "end"
@@ -728,7 +749,7 @@ def get_agent_executor():
     workflow.add_conditional_edges(
         "plan_validator",
         route_after_validation,
-        {"tool_executor": "tool_executor", "planner": "planner"}
+        {"tool_executor": "tool_executor", "planner": "planner", "final_analyzer": "final_analyzer"}
     )
     workflow.add_conditional_edges(
         "final_analyzer",
