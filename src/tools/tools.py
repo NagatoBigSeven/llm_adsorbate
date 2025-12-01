@@ -1,11 +1,42 @@
 import numpy as np
 from ase import Atoms
 from scipy.spatial.distance import cdist
-import autoadsorbate.Surf 
+import autoadsorbate.Surf
+from src.utils.logger import get_logger
+
+# Initialize logger for this module
+logger = get_logger(__name__)
+
 # Ensure original module is imported first so we can override it
 
-# Fix infinite loop bug in Autoadsorbate library's get_shrinkwrap_grid function
-# This fix adds a Z-axis lower bound check to prevent grid points from falling infinitely through surface voids
+# ========================================
+# Physical and Chemical Constants
+# ========================================
+
+# Grid and site detection parameters
+Z_AXIS_PENETRATION_LIMIT = -1.0  # Angstroms - prevents infinite loop in shrinkwrap algorithm
+EPSILON_TOLERANCE = 0.3  # Tolerance for identifying contact points
+DEFAULT_PRECISION = 0.25  # Angstroms - grid precision (improved from 0.5)
+
+# Collision detection and geometry optimization
+COLLISION_SAFETY_BUFFER_ANGSTROM = 0.2  # Extra safety margin to prevent edge-case collisions
+MIN_COLLISION_THRESHOLD_ANGSTROM = 1.6  # Minimum allowed distance between adsorbate and surface
+PRE_LIFT_HEIGHT_ANGSTROM = 0.5  # Pre-lift height for bridge/hollow sites to reduce collisions
+
+# Bonding criteria for chemical analysis
+BASE_BOND_MULTIPLIER = 1.30  # Standard tolerance multiplier for covalent radii
+STRONG_ADSORPTION_BOND_MULTIPLIER = 1.45  # Relaxed multiplier for strong chemisorption
+STRONG_ADSORPTION_THRESHOLD_EV = -0.5  # Energy threshold for strong adsorption detection
+
+# Subsurface layer detection for crystallographic analysis
+SUBSURFACE_LOWER_BOUND_ANGSTROM = 1.2  # Minimum depth below surface for subsurface layer
+SUBSURFACE_UPPER_BOUND_ANGSTROM = 4.0  # Maximum depth below surface for subsurface layer
+HCP_DETECTION_RADIUS_ANGSTROM = 1.0  # XY distance threshold for HCP site detection
+
+# Slab expansion criteria
+MIN_CELL_SIZE_ANGSTROM = 6.0  # Minimum cell dimension before triggering 2x2 expansion
+
+
 def get_shrinkwrap_grid_fixed(
     slab,
     precision,
@@ -14,10 +45,28 @@ def get_shrinkwrap_grid_fixed(
     marker="He",
     raster_speed_boost=False,
 ):
-    # Import necessary dependencies (dependencies referenced inside the original function)
+    """
+    Fixed version of autoadsorbate's get_shrinkwrap_grid function.
+    
+    This fixes an infinite loop bug where grid points could fall indefinitely
+    through surface voids. The fix adds a Z-axis lower bound check to prevent
+    grid points from penetrating below Z = -1.0 Angstroms.
+    
+    Args:
+        slab: ASE Atoms object representing the surface slab
+        precision: Grid spacing in Angstroms
+        drop_increment: Step size for dropping grid points (default: 0.1)
+        touch_sphere_size: Radius for determining surface contact (default: 2)
+        marker: Element symbol for grid markers (default: "He")
+        raster_speed_boost: Enable rasterization optimization (default: False)
+        
+    Returns:
+        tuple: (grid, faces) where grid is an ASE Atoms object with marker atoms
+               at adsorption site positions, and faces is the surface triangulation
+    """
     from autoadsorbate.Surf import _get_starting_grid, get_large_atoms
     
-    # Handle raster_speed_boost
+
     if raster_speed_boost:
         from autoadsorbate.raster_utilities import get_surface_from_rasterized_top_view
         raster_surf_index = get_surface_from_rasterized_top_view(
@@ -25,7 +74,7 @@ def get_shrinkwrap_grid_fixed(
         )
         slab = slab[raster_surf_index]
 
-    # Get initial grid
+
     starting_grid, faces = _get_starting_grid(slab, precision=precision)
     grid_positions = starting_grid.positions
     large_slab = get_large_atoms(slab)
@@ -34,24 +83,15 @@ def get_shrinkwrap_grid_fixed(
     distances_to_grid = cdist(grid_positions, slab_positions).min(axis=1)
     drop_vectors = np.array([[0, 0, drop_increment] for _ in grid_positions])
 
-    # Original code: while (distances_to_grid > touch_sphere_size).any():
-    # Modified: Added (grid_positions[:, 2] > -1.0) condition
-    # Only continue moving if points are far from surface AND Z coordinate > -1.0.
-    # Once below -1.0, consider as "penetration" and stop moving to prevent infinite loop.
-    while ((distances_to_grid > touch_sphere_size) & (grid_positions[:, 2] > -1.0)).any():
-        
-        # Calculate mask for points that need moving
-        mask_to_move = (distances_to_grid > touch_sphere_size) & (grid_positions[:, 2] > -1.0)
-        
-        # Update positions only for these points
-        grid_positions -= (
-            drop_vectors * mask_to_move[:, np.newaxis]
-        )
-        
-        # Recalculate distances
+    # Critical fix: Add Z-axis lower bound to prevent infinite loop
+    # Original buggy code: while (distances_to_grid > touch_sphere_size).any()
+    # Fixed: Only move points if they are both (1) far from surface AND (2) above Z = -1.0
+    while ((distances_to_grid > touch_sphere_size) & (grid_positions[:, 2] > Z_AXIS_PENETRATION_LIMIT)).any():
+        mask_to_move = (distances_to_grid > touch_sphere_size) & (grid_positions[:, 2] > Z_AXIS_PENETRATION_LIMIT)
+        grid_positions -= (drop_vectors * mask_to_move[:, np.newaxis])
         distances_to_grid = cdist(grid_positions, slab_positions).min(axis=1)
 
-        # Keep original exit condition as double insurance
+        # Keep original exit condition as additional safeguard
         if (distances_to_grid > touch_sphere_size).all() and (
             grid_positions[:, 2] <= 0
         ).all():
@@ -63,24 +103,42 @@ def get_shrinkwrap_grid_fixed(
         pbc=[True, True, True],
         cell=slab.cell,
     )
-    # Filter out points below Z=0 (surface penetration), keeping only points on the surface
+    # Filter out points that penetrated below the surface (Z < 0)
     grid = grid[[atom.index for atom in grid if atom.position[2] > 0]]
 
     return grid, faces
 
 def get_shrinkwrap_ads_sites_fixed(
     atoms: Atoms,
-    precision: float = 0.25,  # Default precision improved from 0.5 to 0.25
+    precision: float = DEFAULT_PRECISION,
     touch_sphere_size: float = 2,
     return_trj: bool = False,
     return_geometry = False
 ):
+    """
+    Fixed version of autoadsorbate's get_shrinkwrap_ads_sites function.
+    
+    This improves upon the original by:
+    1. Increasing default precision from 0.5 to 0.25 Angstroms
+    2. Using epsilon=0.3 for contact point detection (improved from 0.1)
+    3. Utilizing the fixed get_shrinkwrap_grid function
+    
+    Args:
+        atoms: ASE Atoms object representing the surface
+        precision: Grid spacing in Angstroms (default: 0.25)
+        touch_sphere_size: Radius for contact detection (default: 2)
+        return_trj: If True, return trajectory visualization (default: False)
+        return_geometry: If True, return grid geometry (default: False)
+        
+    Returns:
+        dict: Site information including coordinates, connectivity, topology,
+              normal vectors, horizontal vectors, and site formulas
+    """
     import numpy as np
     import itertools
     from ase import Atom
-    # Import helper functions from original library
     from autoadsorbate.Surf import (
-        get_shrinkwrap_grid, # Note: This automatically uses our Patched Fixed version
+        get_shrinkwrap_grid,  # Automatically uses our monkey-patched version
         shrinkwrap_surface, 
         get_list_of_touching, 
         get_wrapped_site,
@@ -88,21 +146,19 @@ def get_shrinkwrap_ads_sites_fixed(
         get_shrinkwrap_site_h_vector
     )
 
-    # 1. Get grid
     grid, faces = get_shrinkwrap_grid(
         atoms, precision=precision, touch_sphere_size=touch_sphere_size
     )
     
-    # 2. Get surface atom indices
     surf_ind = shrinkwrap_surface(
         atoms, precision=precision, touch_sphere_size=touch_sphere_size
     )
     
-    # 3. When identifying contact points, increase epsilon from 0.1 to 0.3
-    # This allows grid points to correctly "grab" all surrounding atoms even if slightly off-center
-    targets = get_list_of_touching(atoms, grid, surf_ind, touch_sphere_size=touch_sphere_size, epsilon=0.3)
+    # Critical improvement: Increased epsilon from 0.1 to 0.3 for better contact detection
+    # This allows grid points to capture surrounding atoms even when slightly off-center
+    targets = get_list_of_touching(atoms, grid, surf_ind, touch_sphere_size=touch_sphere_size, epsilon=EPSILON_TOLERANCE)
 
-    # The following logic remains consistent with the original function for calculating vectors and topology
+
     trj = []
     coordinates = []
     connectivity = []
@@ -128,7 +184,7 @@ def get_shrinkwrap_ads_sites_fixed(
             combs = []
             min_std_devs = []
 
-            # Find geometric center
+
             for c in itertools.combinations(
                 [atom.index for atom in extended_atoms if atom.symbol == "X"],
                 len(target),
@@ -185,19 +241,20 @@ def get_shrinkwrap_ads_sites_fixed(
 
     return sites_dict
 
-# Apply Patch: Replace original function in library with our fixed version
-print("--- 🩹 Applying Autoadsorbate Monkey Patch ... ---")
+# ========================================
+# Apply Autoadsorbate Monkey Patches
+# ========================================
 
-# 1. Patch Source (Surf.py) - In case it's used elsewhere
+logger.info("Applying Autoadsorbate monkey patches for bug fixes")
+
+# Patch both the source module and consumer namespace
 autoadsorbate.Surf.get_shrinkwrap_grid = get_shrinkwrap_grid_fixed
 autoadsorbate.Surf.get_shrinkwrap_ads_sites = get_shrinkwrap_ads_sites_fixed
 
-# 2. Critical Fix: Patch Consumer (autoadsorbate.py)
-# Must override the old function reference already imported in autoadsorbate.autoadsorbate namespace
-import autoadsorbate.autoadsorbate 
+import autoadsorbate.autoadsorbate
 autoadsorbate.autoadsorbate.get_shrinkwrap_ads_sites = get_shrinkwrap_ads_sites_fixed
 
-print("--- ✅ Patch applied. Surf module and Surface class references safely replaced. ---")
+logger.info("Autoadsorbate patches applied successfully")
 
 from collections import Counter
 import ase
@@ -241,11 +298,11 @@ def get_atom_index_menu(original_smiles: str) -> str:
         print(f"--- 🛠️ Heavy atom index list generated: {json.dumps(heavy_atom_menu)} ---")
         return json.dumps(heavy_atom_menu, indent=2)
     except Exception as e:
-        print(f"--- 🛑 get_atom_index_menu failed: {e} ---")
+        logger.error("get_atom_index_menu failed: {e}")
         return json.dumps({"error": f"Unable to generate heavy atom index list: {e}"})
 
 def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[int], site_type: str) -> str:
-    print(f"--- 🔬 Calling SMILES Translator: {original_smiles} via indices {binding_atom_indices} (Site: {site_type}) ---")
+    logger.info(f"Calling SMILES Translator: {original_smiles} via indices {binding_atom_indices} (Site: {site_type})")
     
     mol = Chem.MolFromSmiles(original_smiles)
     if not mol:
@@ -278,7 +335,7 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
         
         # 3. Determine bond type based on electronic state
         if num_radicals > 0:
-            print(f"--- 🔬 Smart Bonding: Radical detected (N={num_radicals}) -> Using Covalent Single Bond (SINGLE) ---")
+            logger.info("Smart Bonding: Radical detected (N={num_radicals}) -> Using Covalent Single Bond (SINGLE)")
             # Strategy: Radicals form covalent bonds, physically clear, geometrically stable
             new_mol.AddBond(marker_idx, target_idx, Chem.rdchem.BondType.SINGLE)
             
@@ -287,7 +344,7 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
             target_atom_obj.SetNumRadicalElectrons(0)
             
         else:
-            print(f"--- 🔬 Smart Bonding: Lone pair detected (Saturated/Double Bond) -> Using Dative Bond (DATIVE: Target->Surf) ---")
+            logger.info("Smart Bonding: Lone pair detected (Saturated/Double Bond) -> Using Dative Bond (DATIVE: Target->Surf)")
             # Strategy: Use dative bond connection.
             # Key Point 1: Direction must be Target Atom -> Marker Atom (Target Donates to Marker)
             # Key Point 2: No charge increase, no valence change. RDKit doesn't count Dative bond valence contribution, so C=O won't error.
@@ -310,10 +367,10 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
             # Catch errors just in case, but DATIVE + Neutral usually passes
             Chem.SanitizeMol(new_mol)
         except Exception as e:
-            print(f"--- ⚠️ Sanitize Warning: {e} ---")
+            logger.warning("Sanitize Warning: {e}")
 
         out_smiles = Chem.MolToSmiles(new_mol.GetMol(), canonical=False, rootedAtAtom=marker_idx)
-        print(f"--- 🔬 SMILES Translator Final Output: {out_smiles} ---")
+        logger.info("SMILES Translator Final Output: {out_smiles}")
         return out_smiles
 
     # --- Case B & C: bridge/hollow (Keep as is) ---
@@ -325,7 +382,7 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
             rw_mol.GetAtomWithIdx(target_idx).SetAtomMapNum(114514)
             original_smiles_mapped = Chem.MolToSmiles(rw_mol.GetMol(), canonical=False)
             out_smiles = f"{original_smiles_mapped}.[S:1].[S:2]"
-            print(f"--- 🔬 SMILES Translator Output: {out_smiles} ---")
+            logger.info("SMILES Translator Output: {out_smiles}")
             return out_smiles
 
         elif num_binding_indices == 2:
@@ -337,7 +394,7 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
             rw_mol.GetAtomWithIdx(idx2).SetAtomMapNum(1919810)
             original_smiles_mapped = Chem.MolToSmiles(rw_mol.GetMol(), canonical=False)
             out_smiles = f"{original_smiles_mapped}.[S:1].[S:2]"
-            print(f"--- 🔬 SMILES Translator Output: {out_smiles} ---")
+            logger.info("SMILES Translator Output: {out_smiles}")
             return out_smiles
         else:
             raise ValueError(f"'{site_type}' site does not support {num_binding_indices} binding indices.")
@@ -347,10 +404,10 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
 def read_atoms_object(slab_path: str) -> ase.Atoms:
     try:
         atoms = read(slab_path)  # Read slab structure from .xyz or .cif file.
-        print(f"Success: Read slab atoms from {slab_path}.")
+        logger.info("Read slab atoms from {slab_path}.")
         return atoms
     except Exception as e:
-        print(f"Error: Unable to read {slab_path}: {e}")
+        logger.error("Unable to read {slab_path}: {e}")
         raise
 
 # --- Unified handling of surface expansion and cleaning ---
@@ -449,7 +506,7 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
         try:
             Chem.SanitizeMol(mol_for_opt)
         except Exception as e:
-            print(f"--- ⚠️ Sanitize Warning: {e} ---")
+            logger.warning("Sanitize Warning: {e}")
 
         params = AllChem.ETKDGv3()
         params.randomSeed = 0xF00D
@@ -459,13 +516,13 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
         conf_ids = list(AllChem.EmbedMultipleConfs(mol_for_opt, numConfs=to_initialize, params=params))
         
         if not conf_ids:
-            print("--- ⚠️ ETKDGv3 failed, trying ETKDGv2 ... ---")
+            logger.warning("ETKDGv3 failed, trying ETKDGv2 ...")
             AllChem.EmbedMolecule(mol_for_opt, AllChem.ETKDGv2())
             if mol_for_opt.GetNumConformers() > 0:
                 conf_ids = [0]
         
         if not conf_ids:
-            print("--- ⚠️ ETKDG series failed, trying Random Coords ... ---")
+            logger.warning("ETKDG series failed, trying Random Coords ...")
             # For forced coordination structures, random coords usually generate "at least one" usable geometry
             params_rand = AllChem.ETKDGv3()
             params_rand.useRandomCoords = True
@@ -484,7 +541,7 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
             try:
                 AllChem.UFFOptimizeMoleculeConfs(mol_for_opt)
             except Exception as e:
-                print(f"--- ⚠️ UFF Optimization Warning: {e} ---")
+                logger.warning("UFF Optimization Warning: {e}")
         
         mol_with_hs.RemoveAllConformers()
         for i, cid in enumerate(conf_ids):
@@ -908,7 +965,7 @@ def relax_atoms(
     try:
         calculator = mace_mp(model=mace_model, device=mace_device, default_dtype=mace_precision, dispersion=use_dispersion)
     except Exception as e:
-        print(f"--- 🛑 MACE Initialization Failed: {e} ---")
+        logger.error("MACE Initialization Failed: {e}")
         raise
 
     if not os.path.exists('outputs'):
@@ -953,7 +1010,7 @@ def relax_atoms(
         
         max_force = np.max(np.linalg.norm(atoms.get_forces(), axis=1))
         if max_force > 200.0:
-            print(f"--- ⚠️ Skipping structure {i+1}: Initial force too high (Max Force = {max_force:.2f} eV/A)... ---")
+            logger.warning(f"Skipping structure {i+1}: Initial force too high (Max Force = {max_force:.2f} eV/A)...")
             continue
 
         if md_steps > 0:
@@ -965,10 +1022,10 @@ def relax_atoms(
 
         # --- Energy sanity check, mask non-physical explosive structures ---
         if (not np.isfinite(energy)) or energy < -2000.0:
-            print(f"--- ⚠️ Skipping structure {i+1}: Abnormal energy (E = {energy:.2f} eV), suspected numerical collapse ---")
+            logger.warning(f"Skipping structure {i+1}: Abnormal energy (E = {energy:.2f} eV), suspected numerical collapse")
             continue
 
-        print(f"--- Evaluating structure {i+1}/{len(atoms_list)}... Energy (after warmup): {energy:.4f} eV ---")
+        logger.info(f"Evaluating structure {i+1}/{len(atoms_list)}... Energy (after warmup): {energy:.4f} eV ")
         evaluated_configs.append((energy, i, atoms.copy())) # Store copy
 
     if not evaluated_configs:
@@ -991,7 +1048,7 @@ def relax_atoms(
     final_structures = []
 
     for i, (initial_energy, original_index, atoms) in enumerate(configs_to_relax):
-        print(f"--- Relaxing best structure {i+1}/{N_RELAX_TOP_N} (Original Index {original_index}, Initial Energy: {initial_energy:.4f} eV) ---")
+        logger.info(f"Relaxing best structure {i+1}/{N_RELAX_TOP_N} (Original Index {original_index}, Initial Energy: {initial_energy:.4f} eV) ")
         
         atoms.calc = calculator
         atoms.set_constraint(constraint)
@@ -1000,7 +1057,7 @@ def relax_atoms(
         adsorbate_indices = list(range(len(slab_indices), len(atoms)))
         initial_adsorbate = atoms.copy()[adsorbate_indices]
         
-        print(f"--- Optimization (BFGS): fmax={fmax}, steps={steps} ---")
+        logger.info("Optimization (BFGS): fmax={fmax}, steps={steps} ")
         dyn_opt = BFGS(atoms, trajectory=None, logfile=None) 
         dyn_opt.attach(lambda: traj.write(atoms), interval=1)
         dyn_opt.run(fmax=fmax, steps=steps)
@@ -1009,11 +1066,11 @@ def relax_atoms(
         final_adsorbate = atoms.copy()[adsorbate_indices]
         bond_change_count = _get_bond_change_count(initial_adsorbate, final_adsorbate)
         atoms.info["bond_change_count"] = bond_change_count
-        print(f"--- Bond Integrity Check: Detected {bond_change_count} bond changes. ---")
+        logger.info(f"Bond Integrity Check: Detected {bond_change_count} bond changes. ")
         
         final_energy = atoms.get_potential_energy()
         final_forces = atoms.get_forces()
-        print(f"--- Best structure {i+1} relaxation complete. Final Energy: {final_energy:.4f} eV ---")
+        logger.info(f"Best structure {i+1} relaxation complete. Final Energy: {final_energy:.4f} eV ")
 
         atoms.results = {
             'energy': final_energy,
@@ -1029,7 +1086,7 @@ def relax_atoms(
     try:
         write(final_traj_file, final_structures)
     except Exception as e:
-        print(f"--- 🛑 Failed to write final_relaxed_structures.xyz: {e} ---")
+        logger.error("Failed to write final_relaxed_structures.xyz: {e}")
         raise
     
     print(f"--- 🛠️ Relaxation complete. Full Trajectory: {traj_file} | Final Structures ({len(final_structures)}): {final_traj_file} ---")
@@ -1083,7 +1140,7 @@ def analyze_relaxation_results(
         relaxed_atoms = traj[best_index]
 
         E_ads = min_energy_total - e_surface_ref - e_adsorbate_ref
-        print(f"--- Analysis: E_ads = {E_ads:.4f} eV (E_total = {min_energy_total:.4f} eV, E_surf={e_surface_ref:.4f}, E_ads_mol={e_adsorbate_ref:.4f}) ---")
+        logger.info(f"Analysis: E_ads = {E_ads:.4f} eV (E_total = {min_energy_total:.4f} eV, E_surf={e_surface_ref:.4f}, E_ads_mol={e_adsorbate_ref:.4f}) ")
         
         # 1. Define smart judgment function (Moved to front for global reuse)
         # For Float32 precision and metal adsorption characteristics, increased base tolerance from 1.25 to 1.3
@@ -1241,13 +1298,13 @@ def analyze_relaxation_results(
                 else:
                     site_crystallography = "(Unknown Layer)"
             except Exception as e_cryst:
-                print(f"--- ⚠️ Crystallographic Analysis Warning: {e_cryst} ---")
+                logger.warning("Crystallographic Analysis Warning: {e_cryst}")
         
         # Append this suffix to actual_site_type so Agent can see the difference
         if site_crystallography:
             actual_site_type += f" {site_crystallography}"
         
-        print(f"--- Analysis: Site Slip Check: Planned {planned_site_type} (conn={planned_connectivity}), Actual {actual_site_type} (conn={actual_connectivity}) ---")
+        logger.info(f"Analysis: Site Slip Check: Planned {planned_site_type} (conn={planned_connectivity}), Actual {actual_site_type} (conn={actual_connectivity}) ")
 
         # 2. Identify adsorbate atoms and surface atoms
         
@@ -1265,7 +1322,7 @@ def analyze_relaxation_results(
             target_atom_symbol = relaxed_atoms[target_atom_global_index].symbol
             target_atom_pos = relaxed_atoms[target_atom_global_index].position
 
-            print(f"--- Analysis: (1-index mode) Checking first adsorbate atom, Symbol: '{target_atom_symbol}', Global Index: {target_atom_global_index}. ---")
+            logger.info("Analysis: (1-index mode) Checking first adsorbate atom, Symbol: '{target_atom_symbol}', Global Index: {target_atom_global_index}. ")
 
             # --- Find all bonded surface atoms, not just the nearest one ---
             bonded_surface_atoms = []
@@ -1330,7 +1387,7 @@ def analyze_relaxation_results(
             if planned_symbols and bonded_surface_atoms:
                 if planned_symbols != actual_symbols:
                     is_chemical_slip = True
-                    print(f"--- ⚠️ Warning: Chemical Site Slip Detected! Planned: {planned_symbols} -> Actual: {actual_symbols} ---")
+                    logger.warning(f"Warning: Chemical Site Slip Detected! Planned: {planned_symbols} -> Actual: {actual_symbols}")
 
             analysis_message = (
                 f"Most stable config adsorption energy: {E_ads:.4f} eV. "
@@ -1380,7 +1437,7 @@ def analyze_relaxation_results(
             target_atom_global_index = adsorbate_indices[0]
             target_atom_symbol = relaxed_atoms[target_atom_global_index].symbol
             target_atom_pos = relaxed_atoms[target_atom_global_index].position
-            print(f"--- Analysis: (2-index mode) Checking first adsorbate atom, Symbol: '{target_atom_symbol}', Global Index: {target_atom_global_index}. ---")
+            logger.info("Analysis: (2-index mode) Checking first adsorbate atom, Symbol: '{target_atom_symbol}', Global Index: {target_atom_global_index}. ")
 
             distances = np.linalg.norm(slab_atoms.positions - target_atom_pos, axis=1)
             min_distance = np.min(distances)
@@ -1395,7 +1452,7 @@ def analyze_relaxation_results(
             second_atom_global_index = adsorbate_indices[1]
             second_atom_symbol = relaxed_atoms[second_atom_global_index].symbol
             second_atom_pos = relaxed_atoms[second_atom_global_index].position
-            print(f"--- Analysis: (side-on mode) Checking second adsorbate atom, Symbol: '{second_atom_symbol}', Global Index: {second_atom_global_index}. ---")
+            logger.info("Analysis: (side-on mode) Checking second adsorbate atom, Symbol: '{second_atom_symbol}', Global Index: {second_atom_global_index}. ")
             
             distances_2 = np.linalg.norm(slab_atoms.positions - second_atom_pos, axis=1)
             min_distance_2 = np.min(distances_2)
@@ -1470,7 +1527,7 @@ def analyze_relaxation_results(
             if planned_symbols and bonded_surface_atoms:
                 if planned_symbols != actual_symbols:
                     is_chemical_slip = True
-                    print(f"--- ⚠️ Warning: Chemical Site Slip Detected! Planned: {planned_symbols} -> Actual: {actual_symbols} ---")
+                    logger.warning(f"Warning: Chemical Site Slip Detected! Planned: {planned_symbols} -> Actual: {actual_symbols}")
             # === 🩹 Fix End ===
 
             analysis_message = (

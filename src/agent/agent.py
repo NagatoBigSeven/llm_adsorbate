@@ -28,6 +28,7 @@ from langchain_core.messages import HumanMessage, AIMessage, BaseMessage, ToolMe
 from langgraph.graph import StateGraph, END
 from langchain_core.output_parsers import JsonOutputParser
 
+from src.utils.logger import get_logger
 from src.tools.tools import (
     read_atoms_object,
     get_atom_index_menu,
@@ -40,6 +41,9 @@ from src.tools.tools import (
     analyze_relaxation_results
 )
 from src.agent.prompts import PLANNER_PROMPT
+
+# Initialize logger for this module
+logger = get_logger(__name__)
 
 MAX_RETRIES = 5
 
@@ -108,12 +112,12 @@ def make_plan_key(plan_json: Optional[dict]) -> Optional[str]:
         key = f"{site_type}|{surf_atoms_str}|{ads_indices_str}|{ads_type}|{float(touch_sphere):.1f}"
         return key
     except Exception as e:
-        print(f"--- ⚠️ make_plan_key failed: {e} ---")
+        logger.warning("make_plan_key failed: {e}")
         return None
 
 # --- 3. Define LangGraph Nodes ---
 def pre_processor_node(state: AgentState) -> dict:
-    print("--- 🔬 Calling Pre-Processor Node ---")
+    logger.info("Calling Pre-Processor Node")
     try:
         analysis = analyze_surface_sites(state["slab_path"])
         return {
@@ -122,7 +126,7 @@ def pre_processor_node(state: AgentState) -> dict:
         }
     except Exception as e:
         error_message = f"Error: Unable to read Slab file '{state['slab_path']}': {e}"
-        print(f"--- Validation Failed: {error_message} ---")
+        logger.info("Validation Failed: {error_message} ")
         return {
             "validation_error": error_message,
             "surface_composition": None,
@@ -130,7 +134,7 @@ def pre_processor_node(state: AgentState) -> dict:
         }
 
 def solution_planner_node(state: AgentState) -> dict:
-    print("--- 🧠 Calling Planner Node ---")
+    logger.info("Calling Planner Node")
     llm = get_llm()
     messages = []
 
@@ -139,7 +143,7 @@ def solution_planner_node(state: AgentState) -> dict:
         if "error" in atom_menu_json:
             raise ValueError(atom_menu_json)
     except Exception as e:
-        print(f"--- 🛑 fatal error: Unable to generate atom menu for SMILES {state['smiles']}: {e} ---")
+        logger.error("fatal error: Unable to generate atom menu for SMILES {state['smiles']}: {e}")
         return {
             "validation_error": f"False, fatal error: Unable to generate atom menu for SMILES {state['smiles']}: {e}"
         }
@@ -161,7 +165,7 @@ def solution_planner_node(state: AgentState) -> dict:
         messages.append(HumanMessage(content=f"Your plan has logical errors: {state['validation_error']}. Please replan."))
     else:
         if state.get("history"):
-            print(f"--- 🧠 Planner: Detected failure history, retrying... ---")
+            logger.info("Planner: Detected failure history, retrying...")
         messages.append(HumanMessage(content=PLANNER_PROMPT.format(**prompt_input)))
 
     response = llm.invoke(messages)
@@ -174,15 +178,15 @@ def solution_planner_node(state: AgentState) -> dict:
             content_str = content_str[7:-3].strip()
         
         plan_json = parser.parse(content_str)
-        print(f"--- 🧠 Planner Plan Generated ---")
+        logger.info("Planner Plan Generated")
         return {
             "plan": plan_json,
             "messages": [AIMessage(content=response.content)],
             "validation_error": None
         }
     except Exception as e:
-        print(f"--- 🛑 Planner Output JSON Parse Failed: {e} ---")
-        print(f"--- Raw Output: {response.content} ---")
+        logger.error("Planner Output JSON Parse Failed: {e}")
+        logger.info("Raw Output: {response.content} ")
         return {
             "plan": None,
             "validation_error": f"False, Planner output format error: {e}. Please output strictly in JSON format.",
@@ -191,7 +195,7 @@ def solution_planner_node(state: AgentState) -> dict:
 
 def plan_validator_node(state: AgentState) -> dict:
     """ Node 2: Python Validator """
-    print("--- 🐍 Calling Python Validator Node ---")
+    logger.info("Calling Python Validator Node")
 
     try:
         # Use state["smiles"] (from initial input) instead of anything in the plan
@@ -200,7 +204,7 @@ def plan_validator_node(state: AgentState) -> dict:
             raise ValueError(f"RDKit returned None. SMILES might be invalid or contain valences RDKit cannot handle.")
     except Exception as e:
         error = f"False, Base SMILES string '{state['smiles']}' cannot be parsed by RDKit. This is an unrecoverable error. Please check SMILES. Error: {e}"
-        print(f"--- Validation Failed: {error} ---")
+        logger.info("Validation Failed: {error} ")
         # This is a fatal error; we should stop retrying.
         # We notify the router by setting a special validation_error
         # Note: Ideally, the graph should have a "terminal_failure" state,
@@ -209,26 +213,26 @@ def plan_validator_node(state: AgentState) -> dict:
 
     plan_json = state.get("plan")
     if plan_json is None:
-        print("--- Validation Failed: Planner failed to generate valid JSON. ---")
+        logger.info("Validation Failed: Planner failed to generate valid JSON. ")
         return {"validation_error": state.get("validation_error", "False, Planner node failed to generate valid JSON.")}
     if "solution" not in plan_json:
         error = "False, Plan JSON missing 'solution' key."
-        print(f"--- Validation Failed: {error} ---")
+        logger.info("Validation Failed: {error} ")
         return {"validation_error": error}
     
     adsorbate_type = plan_json.get("adsorbate_type")
     if adsorbate_type not in ["Molecule", "ReactiveSpecies"]:
         error = f"False, Plan JSON missing or invalid `adsorbate_type` field (must be 'Molecule' or 'ReactiveSpecies')."
-        print(f"--- Validation Failed: {error} ---")
+        logger.info("Validation Failed: {error} ")
         return {"validation_error": error}
 
     solution = plan_json.get("solution", {})
     if not solution:
         error = "False, Plan JSON missing or malformed ('solution' key is empty)."
-        print(f"--- Validation Failed: {error} ---")
+        logger.info("Validation Failed: {error} ")
         return {"validation_error": error}
     if solution.get("action") == "terminate":
-        print("--- 🛑 Planner decided to terminate (converged or no more plans) ---")
+        logger.error("Planner decided to terminate (converged or no more plans)")
         return {"validation_error": None}  # Pass directly
 
     site_type = solution.get("site_type", "")
@@ -236,40 +240,40 @@ def plan_validator_node(state: AgentState) -> dict:
     ads_indices = solution.get("adsorbate_binding_indices", [])
     if site_type == "ontop" and len(ads_indices) != 1:
         error = f"False, Rule 2: Python check failed. site_type 'ontop' must pair with 1 index (end-on), but got {len(ads_indices)}."
-        print(f"--- Validation Failed: {error} ---")
+        logger.info("Validation Failed: {error} ")
         return {"validation_error": error}
     if site_type == "bridge" and len(ads_indices) not in [1, 2]:
         error = f"False, Rule 2: Python check failed. site_type 'bridge' must pair with 1 (end-on) or 2 (side-on) indices, but got {len(ads_indices)}."
-        print(f"--- Validation Failed: {error} ---")
+        logger.info("Validation Failed: {error} ")
         return {"validation_error": error}
     if site_type == "hollow" and len(ads_indices) not in [1, 2]:
         error = f"False, Rule 2: Python check failed. site_type 'hollow' must pair with 1 (end-on) or 2 (side-on) indices, but got {len(ads_indices)}."
-        print(f"--- Validation Failed: {error} ---")
+        logger.info("Validation Failed: {error} ")
         return {"validation_error": error}
     if not isinstance(surf_atoms, list):
         error = "False, Plan JSON field 'surface_binding_atoms' must be a list."
-        print(f"--- Validation Failed: {error} ---")
+        logger.info("Validation Failed: {error} ")
         return {"validation_error": error}
     if site_type == "ontop" and len(surf_atoms) != 1:
         error = (
             "False, Rule 2b: 'ontop' site requires surface_binding_atoms length of 1, "
             f"but got {len(surf_atoms)}."
         )
-        print(f"--- Validation Failed: {error} ---")
+        logger.info("Validation Failed: {error} ")
         return {"validation_error": error}
     if site_type == "bridge" and len(surf_atoms) not in [1, 2]:
         error = (
             "False, Rule 2b: 'bridge' site requires surface_binding_atoms length of 1 or 2, "
             f"but got {len(surf_atoms)}."
         )
-        print(f"--- Validation Failed: {error} ---")
+        logger.info("Validation Failed: {error} ")
         return {"validation_error": error}
     if site_type == "hollow" and len(surf_atoms) < 3:
         error = (
             "False, Rule 2b: 'hollow' site requires surface_binding_atoms to have at least 3 elements, "
             f"but got {len(surf_atoms)}."
         )
-        print(f"--- Validation Failed: {error} ---")
+        logger.info("Validation Failed: {error} ")
         return {"validation_error": error}
     
     try:
@@ -282,12 +286,12 @@ def plan_validator_node(state: AgentState) -> dict:
                 "False, This plan has already been attempted in the (site_type, surface_binding_atoms, adsorbate_binding_indices) space. "
                 "Please plan a different combination."
             )
-            print(f"--- Validation Failed: {error} ---")
+            logger.info("Validation Failed: {error} ")
             return {"validation_error": error}
     except Exception as e_dup:
-        print(f"--- ⚠️ Exception during Duplicate-check: {e_dup} ---")
+        logger.warning("Exception during Duplicate-check: {e_dup}")
 
-    print("--- Validation Succeeded ---")
+    logger.info("Validation Succeeded ")
     return {"validation_error": None}
 
 def tool_executor_node(state: AgentState) -> dict:
@@ -299,7 +303,7 @@ def tool_executor_node(state: AgentState) -> dict:
 
     if not plan_solution:
         error_message = "Tool Executor Failed: 'plan' missing 'solution' dictionary."
-        print(f"--- 🛑 {error_message} ---")
+        logger.error("{error_message}")
         return {
             "messages": [ToolMessage(content=error_message, tool_call_id="tool_executor")],
             "analysis_json": json.dumps({"status": "error", "message": error_message})
@@ -432,7 +436,7 @@ def tool_executor_node(state: AgentState) -> dict:
             raise ValueError(f"populate_surface_with_fragment failed to generate any configs (empty trajectory: {generated_traj_file}).")
         
         # 8. Structure Relaxation
-        print("--- ⏳ Starting structure relaxation... ---")
+        logger.info("Starting structure relaxation...")
         slab_indices = list(range(len(final_slab_atoms)))
         relax_n = plan_solution.get("relax_top_n", 1)
         print(f"--- 🛠️ MACE using device: {mace_device} ---")
@@ -453,7 +457,7 @@ def tool_executor_node(state: AgentState) -> dict:
         tool_logs.append(f"Success: Structure relaxation complete (Relaxed Top {relax_n}). Trajectory saved to '{final_traj_file}'.")
         
         # 9. Analyze Results
-        print("--- 🔬 Calling Analysis Tool... ---")
+        logger.info("Calling Analysis Tool...")
         analysis_json_str = analyze_relaxation_results(
             relaxed_trajectory_file=final_traj_file,
             slab_atoms=final_slab_atoms,
@@ -463,7 +467,7 @@ def tool_executor_node(state: AgentState) -> dict:
             e_adsorbate_ref=E_adsorbate
         )
         tool_logs.append(f"Success: Analysis tool executed.")
-        print(f"--- 🔬 Analysis Result: {analysis_json_str} ---")
+        logger.info("Analysis Result: {analysis_json_str}")
         analysis_json = json.loads(analysis_json_str)
 
         if analysis_json.get("status") == "success":
@@ -474,7 +478,7 @@ def tool_executor_node(state: AgentState) -> dict:
             if not is_dissociated:
                 e_old_mol = new_best_molecular.get("most_stable_energy_eV", float('inf')) if new_best_molecular else float('inf')
                 if isinstance(e_new, (int, float)) and e_new < e_old_mol:
-                    print(f"--- 🌟 New Best Found [Molecular]: {e_new:.4f} eV ---")
+                    logger.info(f"New Best Found [Molecular]: {e_new:.4f} eV")
                     new_best_molecular = {
                         "most_stable_energy_eV": e_new,
                         "analysis_json": analysis_json,
@@ -486,7 +490,7 @@ def tool_executor_node(state: AgentState) -> dict:
             else:
                 e_old_diss = new_best_dissociated.get("most_stable_energy_eV", float('inf')) if new_best_dissociated else float('inf')
                 if isinstance(e_new, (int, float)) and e_new < e_old_diss:
-                    print(f"--- ⚠️ More stable [Dissociated] state found: {e_new:.4f} eV (will serve as thermodynamic reference) ---")
+                    logger.warning(f"More stable [Dissociated] state found: {e_new:.4f} eV (will serve as thermodynamic reference)")
                     new_best_dissociated = {
                         "most_stable_energy_eV": e_new,
                         "analysis_json": analysis_json,
@@ -496,7 +500,7 @@ def tool_executor_node(state: AgentState) -> dict:
 
     except Exception as e:
         error_message = str(e)
-        print(f"--- 🛑 Tool Execution Failed: {error_message} ---")
+        logger.error("Tool Execution Failed: {error_message}")
         tool_logs.append(f"Error during tool execution: {error_message}")
         analysis_json = {"status": "error", "message": f"Tool execution failed: {error_message}"}
         
@@ -616,38 +620,38 @@ def final_analyzer_node(state: AgentState) -> dict:
     # 4. Call LLM
     response = llm.invoke([HumanMessage(content=final_prompt)])
     
-    print("--- 🏁 Final Report Generated ---")
+    logger.info("Final Report Generated")
     return {"messages": [AIMessage(content=response.content)]}
 
 # --- 4. Define Graph Logic Flow (Edges) ---
 def route_after_validation(state: AgentState) -> str:
-    print("--- 🤔 Python Decision Branch 1 (Validator) ---")
+    logger.info("Python Decision Branch 1 (Validator)")
     if state.get("validation_error"):
-        print(f"--- Decision: Plan failed, returning to Planner ---")
+        logger.info("Decision: Plan failed, returning to Planner ")
         return "planner"
     
     # Routing logic
     plan_json = state.get("plan", {})
     solution = plan_json.get("solution", {})
     if solution.get("action") == "terminate":
-        print(f"--- Decision: Planner requested termination, going to Final Analyzer ---")
+        logger.info("Decision: Planner requested termination, going to Final Analyzer ")
         return "final_analyzer"  # Skip Tool Executor, go directly to report
     
     else:
-        print(f"--- Decision: Plan passed, going to Tool Executor ---")
+        logger.info("Decision: Plan passed, going to Tool Executor ")
         return "tool_executor"
 
 def route_after_analysis(state: AgentState) -> str:
     """
     Simplified Router: Generates rich history and decides next step.
     """
-    print("--- 🤔 Python Decision Branch 3 (Analyzer) ---")
+    logger.info("Python Decision Branch 3 (Analyzer)")
 
     # 1. Priority Check: If previous Planner decided to terminate, and we just finished Final Analyzer,
     #    then we must end the process now.
     plan_solution = state.get("plan", {}).get("solution", {})
     if plan_solution.get("action") == "terminate":
-        print("--- Decision: Termination signal detected (Terminate Action), process ending normally. ---")
+        logger.info("Decision: Termination signal detected (Terminate Action), process ending normally. ")
         return "end"
 
     current_history = state.get("history", [])
@@ -746,7 +750,7 @@ def route_after_analysis(state: AgentState) -> str:
 
     # 5. Decision Logic
     if len(current_history) >= MAX_RETRIES:
-        print(f"--- Decision: Reached {len(current_history)} attempts limit. Process ending. ---")
+        logger.info(f"Decision: Reached {len(current_history)} attempts limit. Process ending. ")
         return "end"
     
     return "planner"
