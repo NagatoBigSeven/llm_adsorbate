@@ -43,7 +43,7 @@ from src.agent.prompts import PLANNER_PROMPT
 
 MAX_RETRIES = 5
 
-# --- 1. 定义智能体状态 (Agent State) ---
+# --- 1. Define Agent State ---
 class AgentState(TypedDict):
     smiles: str
     slab_path: str
@@ -59,7 +59,7 @@ class AgentState(TypedDict):
     attempted_keys: List[str]
     available_sites_description: Optional[str]
 
-# --- 2. 设置环境和 LLM ---
+# --- 2. Setup Environment and LLM ---
 load_dotenv()
 
 if not os.environ.get("GOOGLE_API_KEY"):
@@ -97,11 +97,11 @@ def make_plan_key(plan_json: Optional[dict]) -> Optional[str]:
         touch_sphere = solution.get("touch_sphere_size", 2)
         ads_type = plan_json.get("adsorbate_type", "Molecule")
 
-        # 确保两者是 list，否则返回 None（不抛异常）
+        # Ensure both are lists, otherwise return None (no exception raised)
         if not isinstance(surf_atoms, list) or not isinstance(ads_indices, list):
             return None
 
-        # 统一转成字符串，保留顺序以区分异核双点吸附的方向 (如 Mo-Pd vs Pd-Mo)
+        # Convert to string, preserving order to distinguish heteronuclear dual-point adsorption direction (e.g., Mo-Pd vs Pd-Mo)
         surf_atoms_str = ",".join(str(s) for s in surf_atoms)
         ads_indices_str = ",".join(str(i) for i in ads_indices)
 
@@ -111,7 +111,7 @@ def make_plan_key(plan_json: Optional[dict]) -> Optional[str]:
         print(f"--- ⚠️ make_plan_key failed: {e} ---")
         return None
 
-# --- 3. 定义 LangGraph 节点 ---
+# --- 3. Define LangGraph Nodes ---
 def pre_processor_node(state: AgentState) -> dict:
     print("--- 🔬 Calling Pre-Processor Node ---")
     try:
@@ -194,18 +194,18 @@ def plan_validator_node(state: AgentState) -> dict:
     print("--- 🐍 Calling Python Validator Node ---")
 
     try:
-        # 使用 state["smiles"] (来自初始输入) 而不是 plan 中的任何内容
+        # Use state["smiles"] (from initial input) instead of anything in the plan
         mol = Chem.MolFromSmiles(state["smiles"])
         if not mol:
             raise ValueError(f"RDKit returned None. SMILES might be invalid or contain valences RDKit cannot handle.")
     except Exception as e:
         error = f"False, Base SMILES string '{state['smiles']}' cannot be parsed by RDKit. This is an unrecoverable error. Please check SMILES. Error: {e}"
         print(f"--- Validation Failed: {error} ---")
-        # 这是一个致命错误；我们应该停止重试。
-        # 我们通过设置一个特殊的 validation_error 来通知路由
-        # 注意：理想情况下，图应该有一个 "terminal_failure" 状态，
-        # 但目前我们只能返回给 planner，并期望它在 N 次后停止。
-        return {"validation_error": error, "plan": None} # 清除 plan
+        # This is a fatal error; we should stop retrying.
+        # We notify the router by setting a special validation_error
+        # Note: Ideally, the graph should have a "terminal_failure" state,
+        # but currently we can only return to the planner and expect it to stop after N attempts.
+        return {"validation_error": error, "plan": None} # Clear plan
 
     plan_json = state.get("plan")
     if plan_json is None:
@@ -322,9 +322,9 @@ def tool_executor_node(state: AgentState) -> dict:
         if is_expanded:
             tool_logs.append("Note: Slab was automatically expanded (2x2) for physical accuracy.")
         
-        # 3. 初始化计算器
+        # 3. Initialize Calculator
         try:
-            # 统一定义弛豫参数
+            # Define relaxation parameters uniformly
             has_cuda = torch.cuda.is_available()
 
             if not has_cuda:
@@ -346,7 +346,7 @@ def tool_executor_node(state: AgentState) -> dict:
                 mace_precision = "float64"
                 use_dispersion = True
 
-            # 这里的 temp_calc 主要用于 E_adsorbate 和 E_surface
+            # temp_calc here is mainly used for E_adsorbate and E_surface
             temp_calc = mace_mp(
                 model=mace_model,
                 device=mace_device,
@@ -357,7 +357,7 @@ def tool_executor_node(state: AgentState) -> dict:
         except Exception as e_calc:
             raise ValueError(f"Failed to initialize MACE calculator: {e_calc}")
 
-        # 4. 计算 E_surface
+        # 4. Calculate E_surface
         try:
             e_surf_atoms = final_slab_atoms.copy()
             e_surf_atoms.calc = temp_calc
@@ -375,7 +375,7 @@ def tool_executor_node(state: AgentState) -> dict:
         except Exception as e_surf_err:
             raise ValueError(f"Failed to calculate E_surface: {e_surf_err}")
 
-        # 5. 创建 Fragment
+        # 5. Create Fragment
         fragment_object = create_fragment_from_plan(
             original_smiles=state["smiles"],
             binding_atom_indices=plan_solution.get("adsorbate_binding_indices"),
@@ -384,11 +384,11 @@ def tool_executor_node(state: AgentState) -> dict:
         )
         tool_logs.append(f"Success: Created fragment object from plan (SMILES: {state['smiles']}).")
 
-        # 6. 计算 E_adsorbate
+        # 6. Calculate E_adsorbate
         try:
             adsorbate_only_atoms = fragment_object.conformers[0].copy()
             
-            # 移除标记
+            # Remove markers
             if adsorbate_only_atoms.info["smiles"] == "Cl":
                 del adsorbate_only_atoms[0]
             elif adsorbate_only_atoms.info["smiles"] == "S1S":
@@ -515,7 +515,7 @@ def final_analyzer_node(state: AgentState) -> dict:
     print("--- ✍️ Calling Final Analyzer Node ---")
     llm = get_llm()
     
-    # 1. 提取数据源
+    # 1. Extract Data Sources
     best_result = state.get("best_result")
     best_dissociated = state.get("best_dissociated_result")
     last_analysis_json_str = state.get("analysis_json", "{}")
@@ -525,11 +525,11 @@ def final_analyzer_node(state: AgentState) -> dict:
     except:
         last_analysis = {}
 
-    # 2. 决策：汇报哪个数据？
+    # 2. Decision: Which data to report?
     target_data = None
     plan_used = None
     source_type = "failure"
-    result_label = "Unknown" # 用于提示 LLM 结果类型
+    result_label = "Unknown" # Used to prompt LLM for result type
 
     # Priority 1: History Best
     if best_result and isinstance(best_result, dict):
@@ -664,17 +664,17 @@ def route_after_analysis(state: AgentState) -> str:
             state["history"].append(f"【FATAL ERROR】 Plan: {plan_desc} -> {analysis_data.get('message')}")
             return "end"
 
-        # 1. 提取关键指标
+        # 1. Extract Key Metrics
         energy = analysis_data.get("most_stable_energy_eV", "N/A")
         bond_change = analysis_data.get("bond_change_count", 0)
         is_dissociated = analysis_data.get("is_dissociated", False)
         
-        # 2. 提取位点滑移信息
+        # 2. Extract Site Slip Information
         site_info = analysis_data.get("site_analysis", {})
         actual_site = site_info.get("actual_site_type", "unknown")
         planned_site = site_info.get("planned_site_type", "unknown")
         
-        # 处理化学滑移
+        # Handle Chemical Slip
         is_chem_slip = site_info.get("is_chemical_slip", False)
         planned_syms = site_info.get("planned_symbols", [])
         actual_syms = site_info.get("actual_symbols", [])
@@ -694,7 +694,7 @@ def route_after_analysis(state: AgentState) -> str:
         elif actual_site != "unknown" and planned_site != "unknown" and actual_site != planned_site:
             site_msg = f"⚠️ Geometric Slip: {planned_site} -> {actual_site}"
 
-        # --- 3. [修复逻辑] 智能区分“新最优”与“重复收敛” ---
+        # --- 3. [Fix Logic] Intelligently distinguish "New Best" from "Duplicate Convergence" ---
         tag = ""
         best_res = state.get("best_result")
         
@@ -715,7 +715,7 @@ def route_after_analysis(state: AgentState) -> str:
                 # Not new record, and energy is same -> Duplicate path
                 tag = " [🔄 Converged to known best]"
         
-        # 追加标签
+        # Append Tag
         site_msg = f"{site_msg}{tag}"
 
         # 4. Build History Entry
@@ -741,19 +741,19 @@ def route_after_analysis(state: AgentState) -> str:
     except Exception as e:
         current_history.append(f"History generation exception: {e}")
 
-    # 更新历史记录
+    # Update History
     state["history"] = current_history
 
-    # 5. 决策逻辑
+    # 5. Decision Logic
     if len(current_history) >= MAX_RETRIES:
         print(f"--- Decision: Reached {len(current_history)} attempts limit. Process ending. ---")
         return "end"
     
     return "planner"
 
-# --- 5. 构建并编译图 (Graph) ---
+# --- 5. Build and Compile Graph ---
 def get_agent_executor():
-    """ 构建并编译 Adsorb-Agent 状态机图。"""
+    """ Build and compile the Adsorb-Agent state machine graph. """
     workflow = StateGraph(AgentState)
     workflow.add_node("pre_processor", pre_processor_node)
     workflow.add_node("planner", solution_planner_node)
@@ -776,7 +776,7 @@ def get_agent_executor():
     )
     return workflow.compile()
 
-# --- 6. 运行程序 ---
+# --- 6. Run Program ---
 def _prepare_initial_state(smiles: str, slab_path: str, user_request: str) -> AgentState:
     return {
         "smiles": smiles,

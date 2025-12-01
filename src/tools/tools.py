@@ -2,10 +2,10 @@ import numpy as np
 from ase import Atoms
 from scipy.spatial.distance import cdist
 import autoadsorbate.Surf 
-# 确保先导入原模块，以便我们覆盖它
+# Ensure original module is imported first so we can override it
 
-# 修复 Autoadsorbate 库中 get_shrinkwrap_grid 函数的死循环 Bug
-# 该修复通过添加 Z 轴下限检查，防止网格点从表面空隙中无限掉落
+# Fix infinite loop bug in Autoadsorbate library's get_shrinkwrap_grid function
+# This fix adds a Z-axis lower bound check to prevent grid points from falling infinitely through surface voids
 def get_shrinkwrap_grid_fixed(
     slab,
     precision,
@@ -14,10 +14,10 @@ def get_shrinkwrap_grid_fixed(
     marker="He",
     raster_speed_boost=False,
 ):
-    # 引入必要的依赖 (原函数内部引用的依赖)
+    # Import necessary dependencies (dependencies referenced inside the original function)
     from autoadsorbate.Surf import _get_starting_grid, get_large_atoms
     
-    # 处理 raster_speed_boost
+    # Handle raster_speed_boost
     if raster_speed_boost:
         from autoadsorbate.raster_utilities import get_surface_from_rasterized_top_view
         raster_surf_index = get_surface_from_rasterized_top_view(
@@ -25,7 +25,7 @@ def get_shrinkwrap_grid_fixed(
         )
         slab = slab[raster_surf_index]
 
-    # 获取初始网格
+    # Get initial grid
     starting_grid, faces = _get_starting_grid(slab, precision=precision)
     grid_positions = starting_grid.positions
     large_slab = get_large_atoms(slab)
@@ -34,24 +34,24 @@ def get_shrinkwrap_grid_fixed(
     distances_to_grid = cdist(grid_positions, slab_positions).min(axis=1)
     drop_vectors = np.array([[0, 0, drop_increment] for _ in grid_positions])
 
-    # 原代码: while (distances_to_grid > touch_sphere_size).any():
-    # 修改后: 增加 (grid_positions[:, 2] > -1.0) 条件
-    # 只有当点离表面远 且 Z坐标大于 -1.0 时才继续移动。
-    # 一旦掉到 -1.0 以下，就视为“穿透”并停止移动，防止死循环。
+    # Original code: while (distances_to_grid > touch_sphere_size).any():
+    # Modified: Added (grid_positions[:, 2] > -1.0) condition
+    # Only continue moving if points are far from surface AND Z coordinate > -1.0.
+    # Once below -1.0, consider as "penetration" and stop moving to prevent infinite loop.
     while ((distances_to_grid > touch_sphere_size) & (grid_positions[:, 2] > -1.0)).any():
         
-        # 计算需要移动的点的掩码
+        # Calculate mask for points that need moving
         mask_to_move = (distances_to_grid > touch_sphere_size) & (grid_positions[:, 2] > -1.0)
         
-        # 只更新这些点的位置
+        # Update positions only for these points
         grid_positions -= (
             drop_vectors * mask_to_move[:, np.newaxis]
         )
         
-        # 重新计算距离
+        # Recalculate distances
         distances_to_grid = cdist(grid_positions, slab_positions).min(axis=1)
 
-        # 保留原有的退出条件作为双重保险
+        # Keep original exit condition as double insurance
         if (distances_to_grid > touch_sphere_size).all() and (
             grid_positions[:, 2] <= 0
         ).all():
@@ -63,14 +63,14 @@ def get_shrinkwrap_grid_fixed(
         pbc=[True, True, True],
         cell=slab.cell,
     )
-    # 过滤掉掉到 Z=0 以下的点（即穿透表面的点），只保留挂在表面上的点
+    # Filter out points below Z=0 (surface penetration), keeping only points on the surface
     grid = grid[[atom.index for atom in grid if atom.position[2] > 0]]
 
     return grid, faces
 
 def get_shrinkwrap_ads_sites_fixed(
     atoms: Atoms,
-    precision: float = 0.25,  # 默认精度从 0.5 提升到 0.25
+    precision: float = 0.25,  # Default precision improved from 0.5 to 0.25
     touch_sphere_size: float = 2,
     return_trj: bool = False,
     return_geometry = False
@@ -78,9 +78,9 @@ def get_shrinkwrap_ads_sites_fixed(
     import numpy as np
     import itertools
     from ase import Atom
-    # 引用原库中的辅助函数
+    # Import helper functions from original library
     from autoadsorbate.Surf import (
-        get_shrinkwrap_grid, # 注意：这会自动使用我们刚才Patch过的Fixed版本
+        get_shrinkwrap_grid, # Note: This automatically uses our Patched Fixed version
         shrinkwrap_surface, 
         get_list_of_touching, 
         get_wrapped_site,
@@ -88,21 +88,21 @@ def get_shrinkwrap_ads_sites_fixed(
         get_shrinkwrap_site_h_vector
     )
 
-    # 1. 获取网格
+    # 1. Get grid
     grid, faces = get_shrinkwrap_grid(
         atoms, precision=precision, touch_sphere_size=touch_sphere_size
     )
     
-    # 2. 获取表面原子索引
+    # 2. Get surface atom indices
     surf_ind = shrinkwrap_surface(
         atoms, precision=precision, touch_sphere_size=touch_sphere_size
     )
     
-    # 3. 识别接触点时，将 epsilon 从 0.1 提升到 0.3
-    # 这允许网格点即使稍微偏离中心，也能正确“抓”住周围的所有原子
+    # 3. When identifying contact points, increase epsilon from 0.1 to 0.3
+    # This allows grid points to correctly "grab" all surrounding atoms even if slightly off-center
     targets = get_list_of_touching(atoms, grid, surf_ind, touch_sphere_size=touch_sphere_size, epsilon=0.3)
 
-    # 以下逻辑与原函数保持一致，用于计算向量和拓扑
+    # The following logic remains consistent with the original function for calculating vectors and topology
     trj = []
     coordinates = []
     connectivity = []
@@ -128,7 +128,7 @@ def get_shrinkwrap_ads_sites_fixed(
             combs = []
             min_std_devs = []
 
-            # 寻找几何中心
+            # Find geometric center
             for c in itertools.combinations(
                 [atom.index for atom in extended_atoms if atom.symbol == "X"],
                 len(target),
@@ -188,12 +188,12 @@ def get_shrinkwrap_ads_sites_fixed(
 # Apply Patch: Replace original function in library with our fixed version
 print("--- 🩹 Applying Autoadsorbate Monkey Patch ... ---")
 
-# 1. Patch 源头 (Surf.py) - 以防万一有其他地方用它
+# 1. Patch Source (Surf.py) - In case it's used elsewhere
 autoadsorbate.Surf.get_shrinkwrap_grid = get_shrinkwrap_grid_fixed
 autoadsorbate.Surf.get_shrinkwrap_ads_sites = get_shrinkwrap_ads_sites_fixed
 
-# 2. 关键修复：Patch 消费者 (autoadsorbate.py)
-# 必须覆盖 autoadsorbate.autoadsorbate 命名空间里已经导入的旧函数引用
+# 2. Critical Fix: Patch Consumer (autoadsorbate.py)
+# Must override the old function reference already imported in autoadsorbate.autoadsorbate namespace
 import autoadsorbate.autoadsorbate 
 autoadsorbate.autoadsorbate.get_shrinkwrap_ads_sites = get_shrinkwrap_ads_sites_fixed
 
@@ -253,7 +253,7 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
     
     num_binding_indices = len(binding_atom_indices)
     
-    # --- 情况 A: end-on @ ontop (单点吸附) ---
+    # --- Case A: end-on @ ontop (Single Point Adsorption) ---
     if site_type == "ontop":
         if num_binding_indices != 1:
             raise ValueError(f"'ontop' site requires 1 binding index, but got {num_binding_indices}.")
@@ -263,14 +263,14 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
         if target_idx >= mol.GetNumAtoms():
              raise ValueError(f"Index {target_idx} out of range (Atom count: {mol.GetNumAtoms()}).")
 
-        # 1. 捕获原始状态 (防止 RDKit 自动推导)
+        # 1. Capture original state (Prevent RDKit automatic deduction)
         target_atom_original = mol.GetAtomWithIdx(target_idx)
         original_h_count = target_atom_original.GetTotalNumHs()
         num_radicals = target_atom_original.GetNumRadicalElectrons()
 
         new_mol = Chem.RWMol(mol)
 
-        # 2. 添加 Cl 标记
+        # 2. Add Cl marker
         marker_atom = Chem.Atom("Cl")
         marker_atom.SetAtomMapNum(1) 
         marker_atom.SetIsotope(37)
@@ -279,33 +279,33 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
         # 3. Determine bond type based on electronic state
         if num_radicals > 0:
             print(f"--- 🔬 Smart Bonding: Radical detected (N={num_radicals}) -> Using Covalent Single Bond (SINGLE) ---")
-            # 策略：自由基形成共价键，物理意义明确，几何稳定
+            # Strategy: Radicals form covalent bonds, physically clear, geometrically stable
             new_mol.AddBond(marker_idx, target_idx, Chem.rdchem.BondType.SINGLE)
             
-            # 修正：消除自由基标记，使其成为饱和原子
+            # Fix: Remove radical marker, making it a saturated atom
             target_atom_obj = new_mol.GetAtomWithIdx(target_idx)
             target_atom_obj.SetNumRadicalElectrons(0)
             
         else:
             print(f"--- 🔬 Smart Bonding: Lone pair detected (Saturated/Double Bond) -> Using Dative Bond (DATIVE: Target->Surf) ---")
-            # 策略：使用配位键连接。
-            # 关键点1：方向必须是 目标原子 -> 标记原子 (Target Donates to Marker)
-            # 关键点2：不增加电荷，不改变价态。RDKit 不计算 Dative 键的价态贡献，因此 C=O 不会报错。
+            # Strategy: Use dative bond connection.
+            # Key Point 1: Direction must be Target Atom -> Marker Atom (Target Donates to Marker)
+            # Key Point 2: No charge increase, no valence change. RDKit doesn't count Dative bond valence contribution, so C=O won't error.
             new_mol.AddBond(target_idx, marker_idx, Chem.rdchem.BondType.DATIVE)
             
             target_atom_obj = new_mol.GetAtomWithIdx(target_idx)
 
-        # 4. [安全锁] 绝对锁定氢原子
-        # 无论哪种情况，都严禁 RDKit 自动添加或删除氢原子
+        # 4. [Safety Lock] Absolutely lock Hydrogen atoms
+        # In any case, strictly forbid RDKit from automatically adding or removing Hydrogen atoms
         target_atom_obj.SetNumExplicitHs(original_h_count)
         target_atom_obj.SetNoImplicit(True)
 
-        # 5. 标记追踪
+        # 5. Marker Tracking
         target_atom_obj.SetAtomMapNum(114514)
         if target_atom_obj.GetSymbol() != 'H':
             target_atom_obj.SetIsotope(14) 
 
-        # 6. 强制刷新
+        # 6. Force Refresh
         try:
             # Catch errors just in case, but DATIVE + Neutral usually passes
             Chem.SanitizeMol(new_mol)
@@ -316,7 +316,7 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
         print(f"--- 🔬 SMILES Translator Final Output: {out_smiles} ---")
         return out_smiles
 
-    # --- 情况 B & C: bridge/hollow (保持原样) ---
+    # --- Case B & C: bridge/hollow (Keep as is) ---
     elif site_type in ["bridge", "hollow"]:
         if num_binding_indices == 1:
             target_idx = binding_atom_indices[0]
@@ -353,7 +353,7 @@ def read_atoms_object(slab_path: str) -> ase.Atoms:
         print(f"Error: Unable to read {slab_path}: {e}")
         raise
 
-# --- 统一处理表面的扩胞和清理 ---
+# --- Unified handling of surface expansion and cleaning ---
 def prepare_slab(slab_atoms: ase.Atoms) -> Tuple[ase.Atoms, bool]:
     """
     Clean Slab metadata and expand supercell if needed for physical accuracy.
@@ -361,7 +361,7 @@ def prepare_slab(slab_atoms: ase.Atoms) -> Tuple[ase.Atoms, bool]:
     """
     print("--- 🛠️ [Prepare] Cleaning Slab metadata and checking dimensions... ---")
     
-    # 1. 清理元数据 (解决 autoadsorbate 解析 extxyz 额外列时的崩溃问题)
+    # 1. Clean metadata (Fix autoadsorbate crash when parsing extxyz extra columns)
     symbols = slab_atoms.get_chemical_symbols()
     positions = slab_atoms.get_positions()
     cell = slab_atoms.get_cell()
@@ -369,8 +369,8 @@ def prepare_slab(slab_atoms: ase.Atoms) -> Tuple[ase.Atoms, bool]:
     
     clean_slab = ase.Atoms(symbols=symbols, positions=positions, cell=cell, pbc=pbc)
     
-    # 2. 智能扩胞 (解决 1x1 晶胞找不到 Hollow 位点的问题)
-    # 逻辑: 如果 XY 平面任意晶格矢量长度小于 6.0 Å，则扩胞为 2x2
+    # 2. Smart Expansion (Fix issue where 1x1 cell cannot find Hollow sites)
+    # Logic: If any lattice vector length in XY plane is < 6.0 Å, expand to 2x2
     cell_vectors = clean_slab.get_cell()
     a_len = np.linalg.norm(cell_vectors[0])
     b_len = np.linalg.norm(cell_vectors[1])
@@ -386,28 +386,28 @@ def prepare_slab(slab_atoms: ase.Atoms) -> Tuple[ase.Atoms, bool]:
     return clean_slab, is_expanded
 
 def analyze_surface_sites(slab_path: str) -> dict:
-    """ 预扫描表面，找出实际存在的位点类型，供 Planner 参考 """
+    """ Pre-scan surface to find actually existing site types for Planner reference """
     from collections import defaultdict, Counter
     atoms = read_atoms_object(slab_path)
     clean_slab, _ = prepare_slab(atoms)
     
-    # 空跑 Autoadsorbate
+    # Dry run Autoadsorbate
     s = Surface(clean_slab, precision=1.0, touch_sphere_size=2.0, mode='slab')
     s.sym_reduce()
     
     site_inventory = defaultdict(set)
     for _, row in s.site_df.iterrows():
         conn = row['connectivity']
-        # 将 {'Mo':2, 'Pd':1} 转为 "Mo-Mo-Pd"
+        # Convert {'Mo':2, 'Pd':1} to "Mo-Mo-Pd"
         elements = []
         for el, count in row['site_formula'].items():
             elements.extend([el] * count)
         site_desc = "-".join(sorted(elements))
         site_inventory[conn].add(site_desc)
     
-    # 修复 FCC(100) 等正方形晶格上的虚构 3-fold 位点
-    # 逻辑：如果一个表面同时拥有 4-fold (connectivity=4) 和 3-fold (connectivity=3)，
-    # 且没有极其复杂的低对称性特征，通常 3-fold 是三角剖分的伪影。
+    # Fix fictitious 3-fold sites on square lattices like FCC(100)
+    # Logic: If a surface has both 4-fold (connectivity=4) and 3-fold (connectivity=3),
+    # and no extremely complex low-symmetry features, usually 3-fold is a triangulation artifact.
     if 4 in site_inventory and 3 in site_inventory:
         print("--- 🛠️ Crystallographic Correction: Hollow-4 detected, filtering geometric artifact Hollow-3 sites. ---")
         del site_inventory[3]
@@ -438,7 +438,7 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
         except Exception:
             mol_with_hs = mol
         
-        # 清除电荷以安抚 UFF 力场
+        # Clear charges to appease UFF force field
         mol_for_opt = Chem.Mol(mol_with_hs)
         for atom in mol_for_opt.GetAtoms():
             atom.SetFormalCharge(0)
@@ -471,7 +471,7 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
             params_rand.useRandomCoords = True
             conf_ids = list(AllChem.EmbedMultipleConfs(mol_for_opt, numConfs=1, params=params_rand))
 
-        # 检查是否有带电荷的原子。如果有，UFF 力场可能会崩溃/报错，因此跳过 UFF。
+        # Check for charged atoms. If present, UFF force field might crash/error, so skip UFF.
         has_charge = False
         for atom in mol_for_opt.GetAtoms():
             if atom.GetFormalCharge() != 0:
@@ -499,26 +499,26 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
             conf = mol_with_hs.GetConformer(conf_id)
             positions = conf.GetPositions()
             
-            # 1. 查找所有映射的原子 (增加同位素双重保险)
+            # 1. Find all mapped atoms (Add isotope double insurance)
             map_num_to_idx = {}
             for atom in all_rdkit_atoms:
                 map_num = atom.GetAtomMapNum()
                 idx = atom.GetIdx()
                 iso = atom.GetIsotope()
                 
-                # 优先使用 Map Number
+                # Prioritize Map Number
                 if map_num > 0:
                     map_num_to_idx[map_num] = idx
                 
-                # === [锚点生效] 如果 Map 丢了，用同位素找回 ===
+                # === [Anchor Active] If Map is lost, recover using Isotope ===
                 if iso == 37: 
-                    # 37Cl 是我们的标记
+                    # 37Cl is our marker
                     map_num_to_idx[1] = idx
                 if iso == 14: 
-                    # 14C (或同位素14的原子) 是我们的目标
+                    # 14C (or atom with isotope 14) is our target
                     map_num_to_idx[114514] = idx
             
-            # 2. 根据 TRICK_SMILES 和 num_binding_indices 构建索引列表
+            # 2. Build index list based on TRICK_SMILES and num_binding_indices
             proxy_indices = []
             binding_indices = []
 
@@ -533,7 +533,7 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
                 proxy_indices = [map_num_to_idx[1]]
                 binding_indices = [map_num_to_idx[114514]]
 
-                # 清理临时映射号
+                # Clear temporary map numbers
                 all_rdkit_atoms[map_num_to_idx[114514]].SetAtomMapNum(0)
                 
             elif TRICK_SMILES == "S1S":
@@ -550,19 +550,19 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
 
                     binding_indices = [map_num_to_idx[114514]]
 
-                    # 手动对齐 S-S 向量，使其 *垂直* 于 Z 轴（模拟 end-on）
+                    # Manually align S-S vector to be *perpendicular* to Z axis (Simulate end-on)
                     s1_idx, s2_idx = proxy_indices[0], proxy_indices[1]
                     t1_idx = binding_indices[0]
 
                     p1 = positions[t1_idx]
 
-                    # --- 防止 autoadsorbate 除以零或生成零向量 ---
-                    # 1. 垂直向量 (S1-S2)
+                    # --- Prevent autoadsorbate division by zero or generating zero vector ---
+                    # 1. Perpendicular vector (S1-S2)
                     v_perp = np.array([0.0, 0.5, 0.0])
-                    # 2. 倾斜的中点，使 nvector (p1-midpoint) 既非零也不平行于 Z 轴
+                    # 2. Tilted midpoint, so nvector (p1-midpoint) is neither zero nor parallel to Z axis
                     midpoint = p1 - np.array([0.1, 0.0, 1.0])
 
-                    # 放置 S1 和 S2
+                    # Place S1 and S2
                     positions[s1_idx] = midpoint + v_perp
                     positions[s2_idx] = midpoint - v_perp
 
@@ -576,54 +576,54 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
 
                     binding_indices = [map_num_to_idx[114514], map_num_to_idx[1919810]]
 
-                    # 改用 Parallel-Bridge 策略
-                    # 使 S-S 向量 (Dummy Atoms) 平行于成键原子之间的键向量
-                    # 这样当 Autoadsorbate 将 S-S 对齐到表面 Bridge 轴时，分子键也会平行于 Bridge 轴。
+                    # Switch to Parallel-Bridge Strategy
+                    # Make S-S vector (Dummy Atoms) parallel to the bond vector between bonding atoms
+                    # This way when Autoadsorbate aligns S-S to surface Bridge axis, molecular bond will also parallel Bridge axis.
                     s1_idx, s2_idx = proxy_indices[0], proxy_indices[1]
                     t1_idx, t2_idx = binding_indices[0], binding_indices[1]
 
-                    # 1. 获取目标原子的位置
+                    # 1. Get target atom positions
                     p1 = positions[t1_idx]
                     p2 = positions[t2_idx]
                         
-                    # 2. 计算它们的中点和键向量
+                    # 2. Calculate their midpoint and bond vector
                     midpoint = (p1 + p2) / 2.0
                     v_bond = p1 - p2
                         
-                    # 3. 归一化键向量
+                    # 3. Normalize bond vector
                     norm = np.linalg.norm(v_bond)
                     if norm < 1e-3: 
                         v_bond_norm = np.array([1.0, 0.0, 0.0])
                     else:
                         v_bond_norm = v_bond / norm
                         
-                    # 4. 将 S1 和 S2 放置在中点两侧，沿键向量方向延伸
-                    # 距离 0.5 是任意的，只要定义了方向即可。
+                    # 4. Place S1 and S2 on both sides of midpoint, extending along bond vector
+                    # Distance 0.5 is arbitrary, as long as direction is defined.
                     positions[s1_idx] = midpoint + v_bond_norm * 0.5
                     positions[s2_idx] = midpoint - v_bond_norm * 0.5
                         
                     print(f"--- 🛠️ _get_fragment: Aligned S-S vector parallel to bond axis (Parallel Alignment) to avoid Cross-Bridge issues. ---")
                         
-                    # 5. 清理临时映射号
+                    # 5. Clear temporary map numbers
                     all_rdkit_atoms[t1_idx].SetAtomMapNum(0)
                     all_rdkit_atoms[t2_idx].SetAtomMapNum(0)
 
-            # 3. 构建新的、*有保证*的原子顺序
+            # 3. Build new, *guaranteed* atom order
 
-            # 收集所有*既不是*代理原子*也不是*成键原子的原子
+            # Collect all atoms that are *neither* proxy atoms *nor* bonding atoms
             special_indices_set = set(proxy_indices + binding_indices)
             other_indices = [atom.GetIdx() for atom in all_rdkit_atoms if atom.GetIdx() not in special_indices_set and atom.GetAtomMapNum() == 0]
 
-            # 强制执行 autoadsorbate 期望的顺序
+            # Enforce order expected by autoadsorbate
             new_order = proxy_indices + binding_indices + other_indices
             
-            # 4. 根据新顺序提取符号和位置
+            # 4. Extract symbols and positions based on new order
             new_symbols = [all_rdkit_atoms[i].GetSymbol() for i in new_order]
             new_positions = [positions[i] for i in new_order]
             
-            # 5. 创建 ASE Atoms 对象，并设置关键的 .info["smiles"]
+            # 5. Create ASE Atoms object and set critical .info["smiles"]
             new_atoms = Atoms(symbols=new_symbols, positions=new_positions)
-            # 这是 autoadsorbate 库唯一关心的东西：
+            # This is the only thing autoadsorbate library cares about:
             new_atoms.info = {"smiles": TRICK_SMILES} 
             reordered_conformers.append(new_atoms)
 
@@ -659,7 +659,7 @@ def create_fragment_from_plan(
 ) -> Fragment:
     print(f"--- 🛠️ Executing create_fragment_from_plan ... ---")
 
-    # 从规划字典中提取所需信息
+    # Extract required info from plan dictionary
     plan_solution = plan_dict.get("solution", {})
     adsorbate_type = plan_dict.get("adsorbate_type")
     site_type = plan_solution.get("site_type")
@@ -668,14 +668,14 @@ def create_fragment_from_plan(
     if not site_type or not adsorbate_type:
         raise ValueError("plan_dict missing 'site_type' or 'adsorbate_type'.")
     
-    # 1. 内部调用 SMILES 生成器
+    # 1. Internally call SMILES generator
     surrogate_smiles = generate_surrogate_smiles(
         original_smiles=original_smiles,
         binding_atom_indices=binding_atom_indices,
         site_type=site_type
     )
 
-    # 2. 内部调用构象生成器 (包含所有补丁和技巧)
+    # 2. Internally call conformer generator (includes all patches and tricks)
     fragment = _get_fragment(
         SMILES=surrogate_smiles,
         site_type=site_type,
@@ -688,7 +688,7 @@ def create_fragment_from_plan(
         print("--- 🛠️ Native Fragment object missing .info dictionary, adding it... ---")
         fragment.info = {}
 
-    # 3. 关键：将原始规划信息附加到 Fragment 对象上
+    # 3. Critical: Attach original plan info to Fragment object
     fragment.info["plan_site_type"] = site_type
     fragment.info["plan_original_smiles"] = original_smiles
     fragment.info["plan_binding_atom_indices"] = binding_atom_indices
@@ -699,34 +699,34 @@ def create_fragment_from_plan(
 
 def _bump_adsorbate_to_safe_distance(slab_atoms: ase.Atoms, full_atoms: ase.Atoms, min_dist_threshold: float = 1.5) -> ase.Atoms:
     """
-    检查吸附物是否与表面发生碰撞。如果有，沿 Z 轴向上推，直到没有碰撞。
+    Check if adsorbate collides with surface. If so, bump up along Z axis until no collision.
     """
-    # 1. 区分表面和吸附物
+    # 1. Distinguish surface and adsorbate
     n_slab = len(slab_atoms)
     adsorbate_indices = list(range(n_slab, len(full_atoms)))
     
     if not adsorbate_indices:
         return full_atoms
 
-    # 2. 提取位置
+    # 2. Extract positions
     slab_pos = full_atoms.positions[:n_slab]
     ads_pos = full_atoms.positions[n_slab:]
     
-    # 3. 计算距离矩阵 (Adsorbate vs Slab)
-    # 注意：对于非常大的体系，可以使用 NeighborList，但这里直接计算 cdist 够快且稳健
+    # 3. Calculate distance matrix (Adsorbate vs Slab)
+    # Note: For very large systems, NeighborList can be used, but cdist is fast and robust enough here
     dists = cdist(ads_pos, slab_pos)
     min_d = np.min(dists)
     
-    # 4. 如果太近，计算需要抬升多少
+    # 4. If too close, calculate how much to bump up
     if min_d < min_dist_threshold:
-        # 我们希望 min_d 至少是 min_dist_threshold
-        # 简单的策略：逐步抬升，或者直接一次性抬升 (threshold - min_d) + buffer
-        # 考虑到几何形状复杂，直接加 Z 是最安全的
+        # We want min_d to be at least min_dist_threshold
+        # Simple strategy: Stepwise bump, or one-time bump (threshold - min_d) + buffer
+        # Considering complex geometry, adding Z directly is safest
         bump_height = (min_dist_threshold - min_d) + 0.2 # Extra 0.2 A buffer
         
         print(f"--- 🛡️ Collision Detected: Atom overlap found (min_dist={min_d:.2f} Å < {min_dist_threshold} Å). Bumping up by {bump_height:.2f} Å... ---")
         
-        # 修改吸附物坐标
+        # Modify adsorbate coordinates
         full_atoms.positions[adsorbate_indices, 2] += bump_height
     
     return full_atoms
@@ -741,9 +741,9 @@ def populate_surface_with_fragment(
     if not hasattr(fragment_object, "info") or "plan_site_type" not in fragment_object.info:
         raise ValueError("Fragment object missing 'plan_site_type' info.")
 
-    # --- 从规划中读取参数 (或使用默认值) ---
+    # --- Read parameters from plan (or use defaults) ---
     raw_site_type = plan_solution.get("site_type", "all")
-    # 强制归一化：将 "hollow-3", "hollow-4" 统一修正为 "hollow"
+    # Force normalization: Correct "hollow-3", "hollow-4" to "hollow"
     if raw_site_type.lower().startswith("hollow"):
         site_type = "hollow"
     else:
@@ -754,34 +754,34 @@ def populate_surface_with_fragment(
 
     print(f"--- 🛠️ Initializing Surface (touch_sphere_size={touch_sphere_size})... ---")
     
-    # 为了安全起见，这里再次清理元数据，确保 autoadsorbate 接收到纯净的 Atoms 对象
+    # For safety, clean metadata again here to ensure autoadsorbate receives clean Atoms object
     symbols = slab_atoms.get_chemical_symbols()
     positions = slab_atoms.get_positions()
     cell = slab_atoms.get_cell()
     pbc = slab_atoms.get_pbc()
     clean_slab_atoms = ase.Atoms(symbols=symbols, positions=positions, cell=cell, pbc=pbc)
 
-    # 明确设置 mode='slab'
+    # Explicitly set mode='slab'
     s = Surface(
         clean_slab_atoms,
         precision=1.0, 
         touch_sphere_size=touch_sphere_size,
-        mode='slab'  # 明确设置模式，防止默认为 'dummy'
+        mode='slab'  # Explicitly set mode to prevent default 'dummy'
     )
 
     original_site_count = len(s.site_df)
     s.sym_reduce()
     print(f"--- 🛠️ Surface Sites: Reduced from {original_site_count} to {len(s.site_df)} inequivalent sites. ---")
 
-    # 检查是否找到了位点
-    # 这可以防止在 `s.site_df.connectivity` 上失败
+    # Check if sites were found
+    # This prevents failure on s.site_df.connectivity
     if s.site_df.empty or len(s.site_df) == 0:
         raise ValueError(
             f"Autoadsorbate failed to find any adsorption sites on the surface (0 sites found). "
             f"This might be due to inappropriate `touch_sphere_size` ({touch_sphere_size}) (too large or too small)."
         )
 
-    # --- 2. 验证规划与位点的兼容性 (Connectivity 过滤) ---
+    # --- 2. Verify plan compatibility with sites (Connectivity filtering) ---
     site_df_filtered = s.site_df
     if site_type == "ontop":
         site_df_filtered = s.site_df[s.site_df.connectivity == 1]
@@ -794,39 +794,39 @@ def populate_surface_with_fragment(
     else:
         raise ValueError(f"Unknown site_type: '{site_type}'.")
 
-    # --- 3. 可选的表面原子过滤 ---
+    # --- 3. Optional Surface Atom Filtering ---
     allowed_symbols = plan_solution.get("surface_binding_atoms")
     if allowed_symbols and len(allowed_symbols) > 0:
         # Use sorted string for logging, clear and concise
         print(f"--- 🛠️ Filtering by surface symbols (strict match): {sorted(allowed_symbols)} ---")
         
-        # 预先计算目标的原子计数 (例如: {'Mo': 2, 'Pd': 1})
+        # Pre-calculate target atom counts (e.g., {'Mo': 2, 'Pd': 1})
         target_counts = Counter(allowed_symbols)
         
         def check_symbols(site_formula_dict):
             if not site_formula_dict or not isinstance(site_formula_dict, dict):
                 return False
             
-            # 严格匹配逻辑：
-            # 将 site_formula_dict (例如 {'Mo': 2, 'Pd': 1}) 展开并计数，必须与目标完全一致
-            # 防止请求 ['Mo', 'Mo'] (纯桥位) 却返回 {'Mo': 2, 'Pd': 1} (混合空位) 的情况
+            # Strict matching logic:
+            # Expand and count site_formula_dict (e.g., {'Mo': 2, 'Pd': 1}), must match target exactly
+            # Prevent requesting ['Mo', 'Mo'] (pure bridge) but returning {'Mo': 2, 'Pd': 1} (mixed hollow)
             
-            # 1. 展开位点成分 (dict -> list)
+            # 1. Expand site composition (dict -> list)
             site_atoms_list = []
             for sym, count in site_formula_dict.items():
                 site_atoms_list.extend([sym] * count)
             
-            # 2. 比较计数器
+            # 2. Compare counters
             return Counter(site_atoms_list) == target_counts
 
         initial_count = len(site_df_filtered)
-        # 应用严格过滤器
+        # Apply strict filter
         site_df_filtered = site_df_filtered[
             site_df_filtered['site_formula'].apply(check_symbols)
         ]
         print(f"--- 🛠️ Surface Symbol Filter: Sites reduced from {initial_count} to {len(site_df_filtered)}. ---")
 
-    # 将 s.site_df 替换为过滤后的 df
+    # Replace s.site_df with filtered df
     s.site_df = site_df_filtered
     site_index_arg = list(s.site_df.index)
     
@@ -835,7 +835,7 @@ def populate_surface_with_fragment(
     if len(site_index_arg) == 0:
         raise ValueError(f"No sites of type '{site_type}' containing {allowed_symbols} found. Cannot proceed.")
 
-    # --- 4. 决定 sample_rotation ---
+    # --- 4. Determine sample_rotation ---
     sample_rotation = True
     num_binding_indices = len(fragment_object.info["plan_binding_atom_indices"])
     if num_binding_indices == 2:
@@ -855,17 +855,17 @@ def populate_surface_with_fragment(
       verbose=True
     )
 
-    # 针对 Bridge 和 Hollow 位点，预先抬升 0.5 Å
-    # 原因：autoadsorbate 默认生成的初始距离对于大分子或多位点吸附往往太近，导致频繁触发碰撞修正。
+    # For Bridge and Hollow sites, pre-lift by 0.5 Å
+    # Reason: autoadsorbate default initial distance is often too close for large molecules or multi-site adsorption, causing frequent collision corrections.
     if site_type in ["bridge", "hollow"]:
         print(f"--- 🛠️ Geometry Optimization: Pre-lifting adsorbate by 0.5 Å for {site_type} site to reduce collisions... ---")
         for atoms in raw_out_trj:
-            # 找到吸附物原子的索引 (假设最后加入的是吸附物)
+            # Find adsorbate atom indices (assuming adsorbate is added last)
             n_slab = len(slab_atoms)
             atoms.positions[n_slab:, 2] += 0.5
     
     
-    # 对生成的构型进行碰撞检测和抬升 (阈值 1.8 Å)
+    # Perform collision detection and lifting for generated configurations (Threshold 1.8 Å)
     safe_out_trj = []
     for idx, atoms in enumerate(raw_out_trj):
         safe_atoms = _bump_adsorbate_to_safe_distance(slab_atoms, atoms, min_dist_threshold=1.6)
@@ -878,7 +878,7 @@ def populate_surface_with_fragment(
     if not out_trj:
         raise ValueError(f"get_populated_sites failed to generate any configurations. overlap_thr ({overlap_thr}) might be too strict.")
     
-    # 将 ase.Atoms 列表保存到 Trajectory 对象中
+    # Save ase.Atoms list to Trajectory object
     if not os.path.exists('outputs'):
         os.makedirs('outputs')
         
@@ -914,10 +914,10 @@ def relax_atoms(
     if not os.path.exists('outputs'):
         os.makedirs('outputs')
         
-    # 优化：我们只弛豫最好的 N 个构型
+    # Optimization: We only relax the best N configurations
     N_RELAX_TOP_N = relax_top_n
 
-    # 约束
+    # Constraints
     constraint = FixAtoms(indices=slab_indices)
 
     def _get_bond_change_count(initial, final):
@@ -928,7 +928,7 @@ def relax_atoms(
         d_initial = initial.get_all_distances()
         d_final = final.get_all_distances()
 
-        # 忽略 H-H 键
+        # Ignore H-H bonds
         symbols = initial.get_chemical_symbols()
         is_H = np.array([s == 'H' for s in symbols])
         mask = is_H[:, None] & is_H[None, :]
@@ -936,7 +936,7 @@ def relax_atoms(
         np.fill_diagonal(d_final, 99.0)
 
         bonds_initial = (d_initial < cutoff_mat) & (~mask)
-        # 宽松阈值检测断键 (1.5倍)
+        # Loose threshold for bond breaking detection (1.5x)
         bonds_final_loose = (d_final < cutoff_mat * 1.5) & (~mask)
         bonds_final_strict = (d_final < cutoff_mat) & (~mask)
 
@@ -963,7 +963,7 @@ def relax_atoms(
 
         energy = atoms.get_potential_energy()
 
-        # --- 能量 sanity check，屏蔽非物理爆炸结构 ---
+        # --- Energy sanity check, mask non-physical explosive structures ---
         if (not np.isfinite(energy)) or energy < -2000.0:
             print(f"--- ⚠️ Skipping structure {i+1}: Abnormal energy (E = {energy:.2f} eV), suspected numerical collapse ---")
             continue
@@ -974,8 +974,8 @@ def relax_atoms(
     if not evaluated_configs:
         raise ValueError("Evaluation phase failed to evaluate any configurations.")
 
-    # --- 2. 选择最佳 ---
-    evaluated_configs.sort(key=lambda x: x[0]) # 按能量排序
+    # --- 2. Select Best ---
+    evaluated_configs.sort(key=lambda x: x[0]) # Sort by energy
     
     if N_RELAX_TOP_N > len(evaluated_configs):
         print(f"--- 🛠️ Warning: Requested to relax top {N_RELAX_TOP_N}, but only {len(evaluated_configs)} available. Relaxing all. ---")
@@ -985,7 +985,7 @@ def relax_atoms(
     
     print(f"--- 🛠️ Evaluation complete. Relaxing best {N_RELAX_TOP_N} of {len(atoms_list)} configurations. ---")
     
-    # --- 3. 弛豫阶段 (仅 N_RELAX_TOP_N) ---
+    # --- 3. Relaxation Phase (Only N_RELAX_TOP_N) ---
     traj_file = f"outputs/relaxation_run.traj"
     traj = Trajectory(traj_file, 'w')
     final_structures = []
@@ -996,7 +996,7 @@ def relax_atoms(
         atoms.calc = calculator
         atoms.set_constraint(constraint)
 
-        # --- 捕获弛豫前的吸附物 ---
+        # --- Capture adsorbate before relaxation ---
         adsorbate_indices = list(range(len(slab_indices), len(atoms)))
         initial_adsorbate = atoms.copy()[adsorbate_indices]
         
@@ -1005,7 +1005,7 @@ def relax_atoms(
         dyn_opt.attach(lambda: traj.write(atoms), interval=1)
         dyn_opt.run(fmax=fmax, steps=steps)
 
-        # --- 捕获弛豫后的吸附物状态并检查键变化 ---
+        # --- Capture adsorbate state after relaxation and check bond changes ---
         final_adsorbate = atoms.copy()[adsorbate_indices]
         bond_change_count = _get_bond_change_count(initial_adsorbate, final_adsorbate)
         atoms.info["bond_change_count"] = bond_change_count
@@ -1069,7 +1069,7 @@ def analyze_relaxation_results(
         if len(traj) == 0:
             return json.dumps({"status": "error", "message": "Relaxation trajectory is empty or unreadable."})
 
-        # 1. 找到最稳定的构型
+        # 1. Find the most stable configuration
         energies = []
         for atoms in traj:
             try:
@@ -1085,72 +1085,72 @@ def analyze_relaxation_results(
         E_ads = min_energy_total - e_surface_ref - e_adsorbate_ref
         print(f"--- Analysis: E_ads = {E_ads:.4f} eV (E_total = {min_energy_total:.4f} eV, E_surf={e_surface_ref:.4f}, E_ads_mol={e_adsorbate_ref:.4f}) ---")
         
-        # 1. 定义智能判定函数 (移动到最前方，供全局复用)
-        # 针对 Float32 精度和金属吸附特性，将基础容忍度从 1.25 提升至 1.3
+        # 1. Define smart judgment function (Moved to front for global reuse)
+        # For Float32 precision and metal adsorption characteristics, increased base tolerance from 1.25 to 1.3
         def check_bonding_smart(atom_idx_1, atom_idx_2, r1, r2, current_energy_eV, check_atoms_obj):
-            base_mult = 1.30 # 基础键长容忍度
+            base_mult = 1.30 # Base bond length tolerance
             
-            # 能量辅助判定: 如果能量极低 (< -0.5 eV)，说明必然有强相互作用，放宽几何判定
+            # Energy-assisted judgment: If energy is very low (< -0.5 eV), strong interaction is certain, relax geometric judgment
             if current_energy_eV < -0.5:
-                base_mult = 1.45 # 即使几何略微拉伸，只要能量很低，就算成键
+                base_mult = 1.45 # Even if geometry is slightly stretched, count as bonded if energy is low
             
             d = check_atoms_obj.get_distance(atom_idx_1, atom_idx_2, mic=True)
             threshold = (r1 + r2) * base_mult
             return d <= threshold, d, threshold
 
-        # 1. 提取吸附物原子
+        # 1. Extract adsorbate atoms
         adsorbate_atoms = relaxed_atoms[len(slab_atoms):]
 
-        # 2. 复制并应用 PBC 信息 (关键！防止跨边界原子被误判为断裂)
-        # 我们创建一个临时的 Atoms 对象来进行拓扑分析
+        # 2. Copy and apply PBC info (Critical! Prevent cross-boundary atoms from being misjudged as broken)
+        # Create a temporary Atoms object for topology analysis
         check_atoms = adsorbate_atoms.copy()
         check_atoms.set_cell(relaxed_atoms.get_cell())
         check_atoms.set_pbc(relaxed_atoms.get_pbc())
 
-        # 3. 构建邻接矩阵 (考虑 PBC)
-        # mult=1.35 增加对键长拉伸的容忍度
-        # 避免因为强吸附导致的键活化被误判为断键
+        # 3. Build adjacency matrix (Consider PBC)
+        # mult=1.35 Increase tolerance for bond stretching
+        # Avoid misjudging bond activation due to strong adsorption as bond breaking
         check_cutoffs = natural_cutoffs(check_atoms, mult=1.35)
         nl = build_neighbor_list(check_atoms, cutoffs=check_cutoffs, self_interaction=False)
         adjacency_matrix = nl.get_connectivity_matrix()
 
-        # 4. 计算连通分量 (数一数分子碎成了几块)
+        # 4. Calculate connected components (Count how many pieces the molecule broke into)
         n_components, labels = connected_components(adjacency_matrix, directed=False)
 
-        # 5. 判定逻辑
-        # 正常情况下，单分子吸附应该只有 1 个连通分量
+        # 5. Judgment Logic
+        # Normally, single molecule adsorption should have only 1 connected component
         is_dissociated = n_components > 1
 
-        # 6. 获取键变化计数作为辅助参考
+        # 6. Get bond change count as auxiliary reference
         bond_change_count = relaxed_atoms.info.get("bond_change_count", 0)
 
-        # 如果分子碎成了 n 块 (n > 1)，说明至少断了 (n-1) 个键。
-        # 防止出现 "is_dissociated=True" 但 "bond_change_count=0" 的矛盾。
+        # If molecule broke into n pieces (n > 1), at least (n-1) bonds are broken.
+        # Prevent contradiction of "is_dissociated=True" but "bond_change_count=0".
         if is_dissociated and bond_change_count == 0:
             print(f"--- 🛠️ Logic Contradiction Fix: Dissociation detected (n_components={n_components}) but bond_change_count=0. Forcing fix. ---")
             bond_change_count = max(1, n_components - 1)
 
-        # 7. 综合判定反应性
+        # 7. Comprehensive Reactivity Judgment
         reaction_detected = False
         if is_dissociated:
-             # 保留真实的 bond_change_count > 0，这代表异构化
+             # Keep real bond_change_count > 0, representing isomerization
              reaction_detected = True
         elif bond_change_count > 0:
-             # 键变了但没碎 -> 异构化 (Isomerization)
-             # 我们标记 reaction_detected = True，让 Agent 决定这是否是坏事
+             # Bonds changed but not broken -> Isomerization
+             # Mark reaction_detected = True, let Agent decide if this is bad
              reaction_detected = True
         else:
-             # 键没变，分子也没碎 -> 完美的分子吸附
+             # Bonds unchanged, molecule unbroken -> Perfect molecular adsorption
              reaction_detected = False
 
-        # --- 从 plan_dict 检索信息 ---
+        # --- Retrieve info from plan_dict ---
         plan_solution = plan_dict.get("solution", {})
         adsorbate_type = plan_dict.get("adsorbate_type")
         site_type = plan_solution.get("site_type")
         binding_atom_indices = plan_solution.get("adsorbate_binding_indices", [])
         num_binding_indices = len(binding_atom_indices)
 
-        # 1.1. 从 .info 字典中获取规划的位点信息
+        # 1.1. Get planned site info from .info dictionary
         planned_info = relaxed_atoms.info.get("adsorbate_info", {}).get("site", {})
         planned_connectivity = planned_info.get("connectivity")
         planned_site_type = "unknown"
@@ -1158,7 +1158,7 @@ def analyze_relaxation_results(
         elif planned_connectivity == 2: planned_site_type = "bridge"
         elif planned_connectivity and planned_connectivity >= 3: planned_site_type = "hollow"
         
-        # 1.2. 识别表面和吸附物索引
+        # 1.2. Identify surface and adsorbate indices
         slab_indices_check = list(range(len(slab_atoms)))
         adsorbate_indices_check = list(range(len(slab_atoms), len(relaxed_atoms)))
         cov_cutoffs_check = natural_cutoffs(relaxed_atoms, mult=1)
@@ -1170,7 +1170,7 @@ def analyze_relaxation_results(
         elif num_binding_indices == 2 and len(adsorbate_indices_check) >= 2:
             anchor_atom_indices = [adsorbate_indices_check[0], adsorbate_indices_check[1]]
         
-        # 1.3. 计算实际成键的表面原子数量
+        # 1.3. Calculate number of actually bonded surface atoms
         for anchor_idx in anchor_atom_indices:
             r_ads = cov_cutoffs_check[anchor_idx]
             for slab_idx in slab_indices_check:
@@ -1186,12 +1186,12 @@ def analyze_relaxation_results(
         elif actual_connectivity >= 3: actual_site_type = "hollow"
         else: actual_site_type = "desorbed"
 
-        # 物理一致性强制修正 (Sanity Check)
-        # 如果能量很低 (强吸附)，但几何判定为 desorbed，这一定是几何判据太严，强制修正为 chemisorbed
+        # Physical Consistency Forced Correction (Sanity Check)
+        # If energy is very low (strong adsorption) but geometrically desorbed, geometric criteria are too strict, force fix to chemisorbed
         if actual_site_type == "desorbed" and E_ads < -0.5:
             print(f"--- 🛠️ Physical Correction: Strong adsorption energy ({E_ads:.2f} eV) detected but geometrically desorbed. Forcing 'hollow/promiscuous'. ---")
             actual_site_type = "hollow (inferred)"
-            # 保持 actual_connectivity 为 0 或手动设为 3，防止 Agent 困惑
+            # Keep actual_connectivity as 0 or manually set to 3 to prevent Agent confusion
             if actual_connectivity == 0: actual_connectivity = 3
 
         slab_indices = list(range(len(slab_atoms)))
@@ -1200,35 +1200,37 @@ def analyze_relaxation_results(
         slab_atoms_relaxed = relaxed_atoms[slab_indices]
         adsorbate_atoms_relaxed = relaxed_atoms[adsorbate_indices]
 
-        # 我们默认取吸附物列表中的第一个原子作为晶体学探测的锚点
+        # We default to taking the first atom in the adsorbate list as the anchor for crystallographic probing
         target_atom_global_index = adsorbate_indices[0] if len(adsorbate_indices) > 0 else -1
 
-        # FCC/HCP 晶体学辨识
-        # 只有当确认为 hollow 位点时，才进行深层探测
+        # FCC/HCP Crystallographic Identification
+        # Only perform deep probing when confirmed as hollow site
         site_crystallography = ""
         if actual_site_type == "hollow":
             try:
-                # 1. 定义表面层和次表面层
-                # 假设 slab 在 Z 方向上是对齐的，且 z_max 是最上层
+                # 1. Define surface layer and subsurface layer
+                # Assume slab is aligned in Z direction, and z_max is the top layer
+                # Simple layer slicing: Consider 1.5A to 4.0A from top layer as Subsurface
+                # Suitable for most metals (interlayer spacing ~2.0-2.3A)
                 z_coords = slab_atoms_relaxed.positions[:, 2]
                 max_z = np.max(z_coords)
-                # 简单的层切分：认为距离顶层 1.5A 到 4.0A 之间的是次表面层 (Subsurface)
-                # 适用于大多数金属 (层间距 ~2.0-2.3A)
+                # Simple layer slicing: Consider 1.5A to 4.0A from top layer as Subsurface
+                # Suitable for most metals (interlayer spacing ~2.0-2.3A)
                 subsurface_mask = (z_coords < (max_z - 1.2)) & (z_coords > (max_z - 4.0))
                 subsurface_indices_list = np.where(subsurface_mask)[0]
 
                 if len(subsurface_indices_list) > 0:
-                    # 2. 获取目标吸附原子的 XY 坐标
+                    # 2. Get XY coordinates of target adsorbate atom
                     target_pos_xy = relaxed_atoms[target_atom_global_index].position[:2]
                     
-                    # 3. 计算吸附原子与所有次表面原子在 XY 平面上的投影距离
+                    # 3. Calculate projected distance in XY plane between adsorbate atom and all subsurface atoms
                     subsurface_positions_xy = slab_atoms_relaxed.positions[subsurface_indices_list][:, :2]
                     
-                    # 考虑周期性边界条件 (PBC) 计算 XY 距离
-                    # 这里为了简化，我们假设原子正好在正下方，直接用欧氏距离通常足够，
-                    # 但更严谨的做法是使用 ase.geometry.get_distances 或者手动处理 cell
-                    # 这里使用简化的投影距离判定：
-                    # 如果次表面原子在 XY 上的距离 < 1.0 Å，说明正下方有原子 -> HCP
+                    # Calculate XY distance considering Periodic Boundary Conditions (PBC)
+                    # For simplicity, assuming atom is directly below, Euclidean distance is usually enough,
+                    # but a more rigorous approach is using ase.geometry.get_distances or manually handling cell
+                    # Using simplified projected distance judgment here:
+                    # If subsurface atom XY distance < 1.0 Å, atom exists directly below -> HCP
                     dists_xy = np.linalg.norm(subsurface_positions_xy - target_pos_xy, axis=1)
                     min_dist_xy = np.min(dists_xy)
                     
@@ -1241,42 +1243,42 @@ def analyze_relaxation_results(
             except Exception as e_cryst:
                 print(f"--- ⚠️ Crystallographic Analysis Warning: {e_cryst} ---")
         
-        # 将此后缀添加到 actual_site_type 中，以便 Agent 能看到区别
+        # Append this suffix to actual_site_type so Agent can see the difference
         if site_crystallography:
             actual_site_type += f" {site_crystallography}"
         
         print(f"--- Analysis: Site Slip Check: Planned {planned_site_type} (conn={planned_connectivity}), Actual {actual_site_type} (conn={actual_connectivity}) ---")
 
-        # 2. 识别吸附物原子和表面原子
+        # 2. Identify adsorbate atoms and surface atoms
         
         target_atom_global_index = -1
         target_atom_symbol = ""
         analysis_message = ""
         result = {}
 
-        # 准备共价键检查
+        # Prepare covalent bond check
         cov_cutoffs = natural_cutoffs(relaxed_atoms, mult=1)
 
         if num_binding_indices == 1:
-            # 目标原子 *总是* 吸附物列表中的第一个
+            # Target atom is *always* the first in adsorbate list
             target_atom_global_index = adsorbate_indices[0]
             target_atom_symbol = relaxed_atoms[target_atom_global_index].symbol
             target_atom_pos = relaxed_atoms[target_atom_global_index].position
 
             print(f"--- Analysis: (1-index mode) Checking first adsorbate atom, Symbol: '{target_atom_symbol}', Global Index: {target_atom_global_index}. ---")
 
-            # --- 寻找所有成键的表面原子，而不仅仅是最近的一个 ---
+            # --- Find all bonded surface atoms, not just the nearest one ---
             bonded_surface_atoms = []
             min_distance = float('inf')
             nearest_slab_atom_symbol = ""
             nearest_slab_atom_global_index = -1
             
-            # 遍历所有表面原子
+            # Iterate through all surface atoms
             for s_idx in slab_indices:
                 r_ads = cov_cutoffs_check[target_atom_global_index]
                 r_slab = cov_cutoffs_check[s_idx]
                 
-                # 使用智能判定
+                # Use smart judgment
                 is_connected, d, threshold = check_bonding_smart(
                     target_atom_global_index, s_idx, r_ads, r_slab, E_ads, relaxed_atoms
                 )
@@ -1285,7 +1287,7 @@ def analyze_relaxation_results(
                     min_distance = d
                     nearest_slab_atom_global_index = s_idx
                     nearest_slab_atom_symbol = relaxed_atoms[s_idx].symbol
-                    # 动态更新阈值用于报告
+                    # Dynamically update threshold for reporting
                     bonding_cutoff = threshold 
 
                 if is_connected:
@@ -1295,35 +1297,35 @@ def analyze_relaxation_results(
                         "distance": round(d, 3)
                     })
             
-            # 按距离排序，让最近的排前面
+            # Sort by distance, nearest first
             bonded_surface_atoms.sort(key=lambda x: x["distance"])
 
-            # 生成带原子索引的唯一位点指纹 (Site Fingerprint)
-            # 这能区分 "Ru-Ru Bridge near Mo" 和 "Ru-Ru Bridge far from Mo"
+            # Generate unique Site Fingerprint with atom indices
+            # This distinguishes "Ru-Ru Bridge near Mo" from "Ru-Ru Bridge far from Mo"
             bonded_indices = sorted([item['index'] for item in bonded_surface_atoms])
             site_fingerprint = "-".join([f"{item['symbol']}{item['index']}" for item in bonded_surface_atoms])
             
             is_bound = len(bonded_surface_atoms) > 0
             
-            # 生成成键描述字符串 (例如: "Cu-2.01Å, Ga-2.15Å")
+            # Generate bonding description string (e.g., "Cu-2.01Å, Ga-2.15Å")
             if is_bound:
                 bonded_desc = ", ".join([f"{item['symbol']}-{item['distance']}Å" for item in bonded_surface_atoms])
             else:
                 bonded_desc = "None"
             
-            # 估算最近原子的 cutoff 用于报告
+            # Estimate nearest atom cutoff for reporting
             nearest_radius_sum = cov_cutoffs[target_atom_global_index] + cov_cutoffs[nearest_slab_atom_global_index]
             estimated_covalent_cutoff_A = nearest_radius_sum * 1.1
 
-            # 化学滑移检测 (Chemical Slip Detection)
-            # 1. 获取规划的表面原子符号 (排序以忽略顺序差异)
+            # Chemical Slip Detection
+            # 1. Get planned surface atom symbols (Sorted to ignore order differences)
             planned_symbols = sorted(plan_solution.get("surface_binding_atoms", []))
             
-            # 2. 获取实际成键的表面原子符号
+            # 2. Get actually bonded surface atom symbols
             actual_symbols = sorted([atom['symbol'] for atom in bonded_surface_atoms])
             
-            # 3. 判定是否发生化学滑移
-            # 注意：如果规划是空的(如未指定)则跳过；如果没成键也跳过
+            # 3. Determine if chemical slip occurred
+            # Note: Skip if plan is empty (unspecified); skip if no bonding
             is_chemical_slip = False
             if planned_symbols and bonded_surface_atoms:
                 if planned_symbols != actual_symbols:
@@ -1372,9 +1374,9 @@ def analyze_relaxation_results(
             if len(adsorbate_indices) < 2:
                  return json.dumps({"status": "error", "message": f"Side-on mode requires at least 2 adsorbate atoms, but found {len(adsorbate_indices)}."})
             
-            # 目标原子 *总是* 吸附物列表中的前两个
+            # Target atoms are *always* the first two in adsorbate list
             
-            # --- 分析第一个原子 (Atom 0) ---
+            # --- Analyze first atom (Atom 0) ---
             target_atom_global_index = adsorbate_indices[0]
             target_atom_symbol = relaxed_atoms[target_atom_global_index].symbol
             target_atom_pos = relaxed_atoms[target_atom_global_index].position
@@ -1389,7 +1391,7 @@ def analyze_relaxation_results(
             bonding_cutoff = (radius_1 + radius_2) * 1.1
             is_bound_1 = min_distance <= bonding_cutoff
 
-            # --- 分析第二个原子 (Atom 1) ---
+            # --- Analyze second atom (Atom 1) ---
             second_atom_global_index = adsorbate_indices[1]
             second_atom_symbol = relaxed_atoms[second_atom_global_index].symbol
             second_atom_pos = relaxed_atoms[second_atom_global_index].position
@@ -1404,14 +1406,14 @@ def analyze_relaxation_results(
             bonding_cutoff_2 = (radius_3 + radius_4) * 1.1
             is_bound_2 = min_distance_2 <= bonding_cutoff_2
 
-            # --- 组合结果 ---
-            # 只有两个原子都成键时，才算成功
+            # --- Combine Results ---
+            # Only successful if both atoms are bonded
             is_bound = bool(is_bound_1 and is_bound_2) 
             
-            # 生成统一的 bonded_surface_atoms 和 final_bond_distance_A ===
+            # Generate unified bonded_surface_atoms and final_bond_distance_A ===
             bonded_surface_atoms = []
 
-            # 定义辅助函数：查找某个吸附原子的所有成键对象
+            # Helper function: Find all bonding targets for an adsorbate atom
             def find_bonds(ads_idx, ads_symbol):
                 bonds = []
                 r_ads = cov_cutoffs_check[ads_idx]
@@ -1420,7 +1422,7 @@ def analyze_relaxation_results(
                     is_connected, d, _ = check_bonding_smart(
                         ads_idx, s_idx, r_ads, r_slab, E_ads, relaxed_atoms
                     )
-                    # 判定成键
+                    # Determine bonding
                     if is_connected:
                         bonds.append({
                             "adsorbate_atom": f"{ads_symbol}({ads_idx})",
@@ -1431,45 +1433,45 @@ def analyze_relaxation_results(
                         })
                 return bonds
 
-            # 收集两个原子的成键信息
+            # Collect bonding info for both atoms
             bonded_surface_atoms.extend(find_bonds(target_atom_global_index, target_atom_symbol))
             bonded_surface_atoms.extend(find_bonds(second_atom_global_index, second_atom_symbol))
             
-            # 按距离排序
+            # Sort by distance
             bonded_surface_atoms.sort(key=lambda x: x["distance"])
 
-            # 生成带原子索引的唯一位点指纹 (Site Fingerprint)
-            # 这能区分 "Ru-Ru Bridge near Mo" 和 "Ru-Ru Bridge far from Mo"
+            # Generate unique Site Fingerprint with atom indices
+            # This distinguishes "Ru-Ru Bridge near Mo" from "Ru-Ru Bridge far from Mo"
             bonded_indices = sorted([item['index'] for item in bonded_surface_atoms])
             site_fingerprint = "-".join([f"{item['symbol']}{item['index']}" for item in bonded_surface_atoms])
 
-            # 计算最终的最短键长 (用于报告)
+            # Calculate final shortest bond length (for reporting)
             if bonded_surface_atoms:
                 final_bond_distance_A = bonded_surface_atoms[0]["distance"]
             else:
                 final_bond_distance_A = min(min_distance, min_distance_2)
             
-            # 生成描述字符串
+            # Generate description string
             if bonded_surface_atoms:
                 bonded_desc = ", ".join([f"{b['adsorbate_atom']}-{b['symbol']}({b['distance']}Å)" for b in bonded_surface_atoms])
             else:
                 bonded_desc = "None"
 
-            # 化学滑移检测 (Chemical Slip Detection)
-            # 1. 获取规划的表面原子符号 (排序以忽略顺序差异)
+            # Chemical Slip Detection
+            # 1. Get planned surface atom symbols (Sorted to ignore order differences)
             planned_symbols = sorted(plan_solution.get("surface_binding_atoms", []))
             
-            # 2. 获取实际成键的表面原子符号
+            # 2. Get actually bonded surface atom symbols
             actual_symbols = sorted([atom['symbol'] for atom in bonded_surface_atoms])
             
-            # 3. 判定是否发生化学滑移
-            # 注意：如果规划是空的(如未指定)则跳过；如果没成键也跳过
+            # 3. Determine if chemical slip occurred
+            # Note: Skip if plan is empty (unspecified); skip if no bonding
             is_chemical_slip = False
             if planned_symbols and bonded_surface_atoms:
                 if planned_symbols != actual_symbols:
                     is_chemical_slip = True
                     print(f"--- ⚠️ Warning: Chemical Site Slip Detected! Planned: {planned_symbols} -> Actual: {actual_symbols} ---")
-            # === 🩹 修复结束 ===
+            # === 🩹 Fix End ===
 
             analysis_message = (
                 f"Most stable config adsorption energy: {E_ads:.4f} eV. "
@@ -1521,11 +1523,11 @@ def analyze_relaxation_results(
         else:
              return json.dumps({"status": "error", "message": f"Analysis failed: Unsupported number of binding indices {num_binding_indices}."})
 
-        # 6. 保存最终结构
-        # 防止文件名冲突导致覆盖历史最优解。
-        # 在文件名中加入：位点类型、表面原子组成、能量。
+        # 6. Save final structure
+        # Prevent filename conflict overwriting history best.
+        # Add to filename: Site type, surface composition, energy.
         
-        # 命名逻辑
+        # Naming Logic
         site_label = actual_site_type if actual_site_type != "unknown" else planned_site_type
         if planned_site_type != "unknown" and site_label != planned_site_type:
             site_label = f"{planned_site_type}_to_{site_label}"
