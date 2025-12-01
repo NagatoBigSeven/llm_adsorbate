@@ -185,8 +185,8 @@ def get_shrinkwrap_ads_sites_fixed(
 
     return sites_dict
 
-# 应用补丁：用我们的修复版函数替换掉库中的原函数
-print("--- 🩹 应用 Autoadsorbate 热修复 (Monkey Patch) ... ---")
+# Apply Patch: Replace original function in library with our fixed version
+print("--- 🩹 Applying Autoadsorbate Monkey Patch ... ---")
 
 # 1. Patch 源头 (Surf.py) - 以防万一有其他地方用它
 autoadsorbate.Surf.get_shrinkwrap_grid = get_shrinkwrap_grid_fixed
@@ -197,7 +197,7 @@ autoadsorbate.Surf.get_shrinkwrap_ads_sites = get_shrinkwrap_ads_sites_fixed
 import autoadsorbate.autoadsorbate 
 autoadsorbate.autoadsorbate.get_shrinkwrap_ads_sites = get_shrinkwrap_ads_sites_fixed
 
-print("--- ✅ 修复已应用。Surf 模块及 Surface 类引用的函数已被安全替换。 ---")
+print("--- ✅ Patch applied. Surf module and Surface class references safely replaced. ---")
 
 from collections import Counter
 import ase
@@ -220,11 +220,11 @@ from rdkit.Chem import AllChem
 from typing import Union, Tuple
 
 def get_atom_index_menu(original_smiles: str) -> str:
-    print(f"--- 🛠️ 正在为 {original_smiles} 生成重原子索引列表 ---")
+    print(f"--- 🛠️ Generating heavy atom index list for {original_smiles} ---")
     try:
         mol = Chem.MolFromSmiles(original_smiles)
         if not mol:
-            raise ValueError(f"RDKit 无法解析 SMILES: {original_smiles}")
+            raise ValueError(f"RDKit cannot parse SMILES: {original_smiles}")
         atom_list = []
         for atom in mol.GetAtoms():
             atom_info = {
@@ -238,30 +238,30 @@ def get_atom_index_menu(original_smiles: str) -> str:
             atom_list.append(atom_info)
             
         heavy_atom_menu = [atom for atom in atom_list if atom["symbol"] != 'H']
-        print(f"--- 🛠️ 重原子索引列表已生成: {json.dumps(heavy_atom_menu)} ---")
+        print(f"--- 🛠️ Heavy atom index list generated: {json.dumps(heavy_atom_menu)} ---")
         return json.dumps(heavy_atom_menu, indent=2)
     except Exception as e:
-        print(f"--- 🛑 get_atom_index_menu 失败: {e} ---")
-        return json.dumps({"error": f"无法生成重原子索引列表: {e}"})
+        print(f"--- 🛑 get_atom_index_menu failed: {e} ---")
+        return json.dumps({"error": f"Unable to generate heavy atom index list: {e}"})
 
 def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[int], site_type: str) -> str:
-    print(f"--- 🔬 调用 SMILES 翻译器: {original_smiles} via indices {binding_atom_indices} (位点: {site_type}) ---")
+    print(f"--- 🔬 Calling SMILES Translator: {original_smiles} via indices {binding_atom_indices} (Site: {site_type}) ---")
     
     mol = Chem.MolFromSmiles(original_smiles)
     if not mol:
-        raise ValueError(f"RDKit 无法解析原始 SMILES: {original_smiles}")
+        raise ValueError(f"RDKit cannot parse original SMILES: {original_smiles}")
     
     num_binding_indices = len(binding_atom_indices)
     
     # --- 情况 A: end-on @ ontop (单点吸附) ---
     if site_type == "ontop":
         if num_binding_indices != 1:
-            raise ValueError(f"'ontop' 位点需要 1 个键合索引，但提供了 {num_binding_indices} 个。")
+            raise ValueError(f"'ontop' site requires 1 binding index, but got {num_binding_indices}.")
             
         target_idx = binding_atom_indices[0]
         
         if target_idx >= mol.GetNumAtoms():
-             raise ValueError(f"索引 {target_idx} 超出范围 (分子原子数: {mol.GetNumAtoms()})。")
+             raise ValueError(f"Index {target_idx} out of range (Atom count: {mol.GetNumAtoms()}).")
 
         # 1. 捕获原始状态 (防止 RDKit 自动推导)
         target_atom_original = mol.GetAtomWithIdx(target_idx)
@@ -276,9 +276,9 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
         marker_atom.SetIsotope(37)
         marker_idx = new_mol.AddAtom(marker_atom)
         
-        # 3. [核心修复] 根据电子态决定键类型
+        # 3. Determine bond type based on electronic state
         if num_radicals > 0:
-            print(f"--- 🔬 智能成键: 检测到自由基 (N={num_radicals}) -> 使用共价单键 (SINGLE) ---")
+            print(f"--- 🔬 Smart Bonding: Radical detected (N={num_radicals}) -> Using Covalent Single Bond (SINGLE) ---")
             # 策略：自由基形成共价键，物理意义明确，几何稳定
             new_mol.AddBond(marker_idx, target_idx, Chem.rdchem.BondType.SINGLE)
             
@@ -287,7 +287,7 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
             target_atom_obj.SetNumRadicalElectrons(0)
             
         else:
-            print(f"--- 🔬 智能成键: 检测到孤对电子 (饱和/双键) -> 使用配位键 (DATIVE: Target->Surf) ---")
+            print(f"--- 🔬 Smart Bonding: Lone pair detected (Saturated/Double Bond) -> Using Dative Bond (DATIVE: Target->Surf) ---")
             # 策略：使用配位键连接。
             # 关键点1：方向必须是 目标原子 -> 标记原子 (Target Donates to Marker)
             # 关键点2：不增加电荷，不改变价态。RDKit 不计算 Dative 键的价态贡献，因此 C=O 不会报错。
@@ -310,56 +310,56 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
             # Catch errors just in case, but DATIVE + Neutral usually passes
             Chem.SanitizeMol(new_mol)
         except Exception as e:
-            print(f"--- ⚠️ Sanitize 警告: {e} ---")
+            print(f"--- ⚠️ Sanitize Warning: {e} ---")
 
         out_smiles = Chem.MolToSmiles(new_mol.GetMol(), canonical=False, rootedAtAtom=marker_idx)
-        print(f"--- 🔬 SMILES 翻译器最终输出: {out_smiles} ---")
+        print(f"--- 🔬 SMILES Translator Final Output: {out_smiles} ---")
         return out_smiles
 
     # --- 情况 B & C: bridge/hollow (保持原样) ---
     elif site_type in ["bridge", "hollow"]:
         if num_binding_indices == 1:
             target_idx = binding_atom_indices[0]
-            if target_idx >= mol.GetNumAtoms(): raise ValueError(f"索引 {target_idx} 超出范围。")
+            if target_idx >= mol.GetNumAtoms(): raise ValueError(f"Index {target_idx} out of range.")
             rw_mol = Chem.RWMol(mol)
             rw_mol.GetAtomWithIdx(target_idx).SetAtomMapNum(114514)
             original_smiles_mapped = Chem.MolToSmiles(rw_mol.GetMol(), canonical=False)
             out_smiles = f"{original_smiles_mapped}.[S:1].[S:2]"
-            print(f"--- 🔬 SMILES 翻译器输出: {out_smiles} ---")
+            print(f"--- 🔬 SMILES Translator Output: {out_smiles} ---")
             return out_smiles
 
         elif num_binding_indices == 2:
             target_indices = sorted(binding_atom_indices)
             idx1, idx2 = target_indices[0], target_indices[1]
-            if idx2 >= mol.GetNumAtoms(): raise ValueError(f"索引 {idx2} 超出范围。")
+            if idx2 >= mol.GetNumAtoms(): raise ValueError(f"Index {idx2} out of range.")
             rw_mol = Chem.RWMol(mol)
             rw_mol.GetAtomWithIdx(idx1).SetAtomMapNum(114514)
             rw_mol.GetAtomWithIdx(idx2).SetAtomMapNum(1919810)
             original_smiles_mapped = Chem.MolToSmiles(rw_mol.GetMol(), canonical=False)
             out_smiles = f"{original_smiles_mapped}.[S:1].[S:2]"
-            print(f"--- 🔬 SMILES 翻译器输出: {out_smiles} ---")
+            print(f"--- 🔬 SMILES Translator Output: {out_smiles} ---")
             return out_smiles
         else:
-            raise ValueError(f"'{site_type}' 位点不支持 {num_binding_indices} 个键合索引。")
+            raise ValueError(f"'{site_type}' site does not support {num_binding_indices} binding indices.")
     else:
-        raise ValueError(f"未知的 site_type: {site_type}。")
+        raise ValueError(f"Unknown site_type: {site_type}.")
 
 def read_atoms_object(slab_path: str) -> ase.Atoms:
     try:
-        atoms = read(slab_path)  # 从 .xyz 或 .cif 文件中读取 slab 结构。
-        print(f"成功: 已从 {slab_path} 读取 slab 原子。")
+        atoms = read(slab_path)  # Read slab structure from .xyz or .cif file.
+        print(f"Success: Read slab atoms from {slab_path}.")
         return atoms
     except Exception as e:
-        print(f"错误: 无法读取 {slab_path}: {e}")
+        print(f"Error: Unable to read {slab_path}: {e}")
         raise
 
 # --- 统一处理表面的扩胞和清理 ---
 def prepare_slab(slab_atoms: ase.Atoms) -> Tuple[ase.Atoms, bool]:
     """
-    清理 Slab 的元数据，并根据需要进行扩胞 (Supercell)，以确保物理模拟的准确性。
-    返回: (处理后的 Slab, 是否进行了扩胞)
+    Clean Slab metadata and expand supercell if needed for physical accuracy.
+    Returns: (Processed Slab, Is Expanded)
     """
-    print("--- 🛠️ [Prepare] 正在清理 Slab 元数据并检查尺寸... ---")
+    print("--- 🛠️ [Prepare] Cleaning Slab metadata and checking dimensions... ---")
     
     # 1. 清理元数据 (解决 autoadsorbate 解析 extxyz 额外列时的崩溃问题)
     symbols = slab_atoms.get_chemical_symbols()
@@ -377,11 +377,11 @@ def prepare_slab(slab_atoms: ase.Atoms) -> Tuple[ase.Atoms, bool]:
     
     is_expanded = False
     if a_len < 6.0 or b_len < 6.0:
-        print(f"--- 🛠️ [Prepare] 检测到微小晶胞 (a={a_len:.2f}Å, b={b_len:.2f}Å)。正在扩胞为 2x2x1... ---")
+        print(f"--- 🛠️ [Prepare] Small cell detected (a={a_len:.2f}Å, b={b_len:.2f}Å). Expanding to 2x2x1... ---")
         clean_slab = clean_slab * (2, 2, 1)
         is_expanded = True
     else:
-        print(f"--- 🛠️ [Prepare] 晶胞尺寸足够 (a={a_len:.2f}Å, b={b_len:.2f}Å)。保持原样。 ---")
+        print(f"--- 🛠️ [Prepare] Cell size sufficient (a={a_len:.2f}Å, b={b_len:.2f}Å). Keeping as is. ---")
         
     return clean_slab, is_expanded
 
@@ -409,7 +409,7 @@ def analyze_surface_sites(slab_path: str) -> dict:
     # 逻辑：如果一个表面同时拥有 4-fold (connectivity=4) 和 3-fold (connectivity=3)，
     # 且没有极其复杂的低对称性特征，通常 3-fold 是三角剖分的伪影。
     if 4 in site_inventory and 3 in site_inventory:
-        print("--- 🛠️ 晶体学修正: 检测到 Hollow-4 位点，自动过滤几何伪影 Hollow-3 位点。 ---")
+        print("--- 🛠️ Crystallographic Correction: Hollow-4 detected, filtering geometric artifact Hollow-3 sites. ---")
         del site_inventory[3]
 
     desc_list = []
@@ -425,12 +425,12 @@ def analyze_surface_sites(slab_path: str) -> dict:
 
 def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_initialize: int = 1) -> Union[Fragment, ase.Atoms]:
     TRICK_SMILES = "Cl" if site_type == "ontop" else "S1S"
-    print(f"--- 🛠️ _get_fragment: 正在为 {site_type} 位点准备 {TRICK_SMILES} 标记...")
+    print(f"--- 🛠️ _get_fragment: Preparing {TRICK_SMILES} marker for {site_type} site...")
 
     try:
         mol = Chem.MolFromSmiles(SMILES, sanitize=False)
         if not mol:
-            raise ValueError(f"RDKit 无法解析映射的 SMILES: {SMILES}")
+            raise ValueError(f"RDKit cannot parse mapped SMILES: {SMILES}")
         mol.UpdatePropertyCache(strict=False)
         
         try:
@@ -449,7 +449,7 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
         try:
             Chem.SanitizeMol(mol_for_opt)
         except Exception as e:
-            print(f"--- ⚠️ Sanitize 警告: {e} ---")
+            print(f"--- ⚠️ Sanitize Warning: {e} ---")
 
         params = AllChem.ETKDGv3()
         params.randomSeed = 0xF00D
@@ -459,14 +459,14 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
         conf_ids = list(AllChem.EmbedMultipleConfs(mol_for_opt, numConfs=to_initialize, params=params))
         
         if not conf_ids:
-            print("--- ⚠️ ETKDGv3 生成失败，尝试 ETKDGv2 ... ---")
+            print("--- ⚠️ ETKDGv3 failed, trying ETKDGv2 ... ---")
             AllChem.EmbedMolecule(mol_for_opt, AllChem.ETKDGv2())
             if mol_for_opt.GetNumConformers() > 0:
                 conf_ids = [0]
         
         if not conf_ids:
-            print("--- ⚠️ ETKDG 系列均失败，尝试随机坐标 (Random Coords) ... ---")
-            # 对于极其不合理的强行配位结构，随机坐标通常能生成“至少一个”可用的几何
+            print("--- ⚠️ ETKDG series failed, trying Random Coords ... ---")
+            # For forced coordination structures, random coords usually generate "at least one" usable geometry
             params_rand = AllChem.ETKDGv3()
             params_rand.useRandomCoords = True
             conf_ids = list(AllChem.EmbedMultipleConfs(mol_for_opt, numConfs=1, params=params_rand))
@@ -479,12 +479,12 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
                 break
         
         if has_charge:
-            print(f"--- 🛠️ _get_fragment: 检测到带电原子，跳过 UFF 预优化。 ---")
+            print(f"--- 🛠️ _get_fragment: Charged atoms detected, skipping UFF pre-optimization. ---")
         else:
             try:
                 AllChem.UFFOptimizeMoleculeConfs(mol_for_opt)
             except Exception as e:
-                print(f"--- ⚠️ UFF 优化警告: {e} ---")
+                print(f"--- ⚠️ UFF Optimization Warning: {e} ---")
         
         mol_with_hs.RemoveAllConformers()
         for i, cid in enumerate(conf_ids):
@@ -525,10 +525,10 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
             if TRICK_SMILES == "Cl":
                 # --- end-on @ ontop ---
                 if num_binding_indices != 1:
-                     raise ValueError(f"代码逻辑错误: TRICK_SMILES='Cl' 但键合索引 != 1")
+                     raise ValueError(f"Logic Error: TRICK_SMILES='Cl' but binding indices != 1")
 
                 if 1 not in map_num_to_idx or 114514 not in map_num_to_idx:
-                    raise ValueError(f"SMILES {SMILES} 缺少映射号 1 (Cl) 或 114514 (成键原子)。")
+                    raise ValueError(f"SMILES {SMILES} missing map number 1 (Cl) or 114514 (binding atom).")
                 
                 proxy_indices = [map_num_to_idx[1]]
                 binding_indices = [map_num_to_idx[114514]]
@@ -539,14 +539,14 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
             elif TRICK_SMILES == "S1S":
                 # --- end-on/side-on @ bridge/hollow ---
                 if 1 not in map_num_to_idx or 2 not in map_num_to_idx:
-                     raise ValueError(f"SMILES {SMILES} 缺少映射号 1 (S1), 2 (S2)。")
+                     raise ValueError(f"SMILES {SMILES} missing map number 1 (S1), 2 (S2).")
                 
                 proxy_indices = [map_num_to_idx[1], map_num_to_idx[2]]
 
                 if num_binding_indices == 1:
                     # --- end-on @ bridge/hollow ---
                     if 114514 not in map_num_to_idx:
-                         raise ValueError(f"SMILES {SMILES} 缺少映射号 114514 (成键原子1)。")
+                         raise ValueError(f"SMILES {SMILES} missing map number 114514 (binding atom 1).")
 
                     binding_indices = [map_num_to_idx[114514]]
 
@@ -566,13 +566,13 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
                     positions[s1_idx] = midpoint + v_perp
                     positions[s2_idx] = midpoint - v_perp
 
-                    print(f"--- 🛠️ _get_fragment: 已手动对齐 S-S 标记用于 End-on 模式 (倾斜修正)。 ---")
+                    print(f"--- 🛠️ _get_fragment: Manually aligned S-S marker for End-on mode (Tilt Correction). ---")
                     all_rdkit_atoms[t1_idx].SetAtomMapNum(0)
 
                 elif num_binding_indices == 2:
                     # --- side-on @ bridge/hollow ---
                     if 114514 not in map_num_to_idx or 1919810 not in map_num_to_idx:
-                         raise ValueError(f"SMILES {SMILES} 缺少映射号 114514 (成键原子1) 或 1919810 (成键原子2)。")
+                         raise ValueError(f"SMILES {SMILES} missing map number 114514 (binding atom 1) or 1919810 (binding atom 2).")
 
                     binding_indices = [map_num_to_idx[114514], map_num_to_idx[1919810]]
 
@@ -602,7 +602,7 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
                     positions[s1_idx] = midpoint + v_bond_norm * 0.5
                     positions[s2_idx] = midpoint - v_bond_norm * 0.5
                         
-                    print(f"--- 🛠️ _get_fragment: 已对齐 S-S 向量平行于键轴 (Parallel Alignment) 以避免 Cross-Bridge 问题。 ---")
+                    print(f"--- 🛠️ _get_fragment: Aligned S-S vector parallel to bond axis (Parallel Alignment) to avoid Cross-Bridge issues. ---")
                         
                     # 5. 清理临时映射号
                     all_rdkit_atoms[t1_idx].SetAtomMapNum(0)
@@ -628,27 +628,27 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
             reordered_conformers.append(new_atoms)
 
         if not reordered_conformers:
-            raise ValueError(f"RDKit 构象生成成功，但原子映射追踪失败 (SMILES: {SMILES})")
+            raise ValueError(f"RDKit conformer generation succeeded, but atom mapping trace failed (SMILES: {SMILES})")
 
-        # 1. 创建一个 *虚拟的* Fragment 对象，使用一个已知有效的SMILES (例如 "C") 来安全地完成 __init__。
-        print(f"--- 🛠️ _get_fragment: 正在安全创建空 Fragment 对象 ... ---")
+        # 1. Create a *dummy* Fragment object using a known valid SMILES (e.g. "C") to safely complete __init__.
+        print(f"--- 🛠️ _get_fragment: Safely creating empty Fragment object ... ---")
         fragment = Fragment.__new__(Fragment)
         
-        # 2. 手动 *覆盖* 库生成的虚拟构象
-        print(f"--- 🛠️ _get_fragment: 正在用 {len(reordered_conformers)} 个已重排的构象覆盖 .conformers ... ---")
+        # 2. Manually *overwrite* library generated dummy conformers
+        print(f"--- 🛠️ _get_fragment: Overwriting .conformers with {len(reordered_conformers)} reordered conformers ... ---")
         fragment.conformers = reordered_conformers
         fragment.conformers_aligned = [False] * len(reordered_conformers)
         
-        # 3. 手动 *覆盖* smile 属性，以便 autoadsorbate.Surface 知道要剥离哪个代理（"Cl" 或 "S1S"）
-        print(f"--- 🛠️ _get_fragment: 正在覆盖 .smile 为 '{TRICK_SMILES}' ... ---")
+        # 3. Manually *overwrite* smile attribute so autoadsorbate.Surface knows which proxy to strip ("Cl" or "S1S")
+        print(f"--- 🛠️ _get_fragment: Overwriting .smile to '{TRICK_SMILES}' ... ---")
         fragment.smile = TRICK_SMILES
         fragment.to_initialize = to_initialize
 
-        print(f"--- 🛠️ _get_fragment: 成功从 *SMILES '{SMILES}' (to_initialize={to_initialize}) 创建了片段对象。 ---")
+        print(f"--- 🛠️ _get_fragment: Successfully created Fragment object from *SMILES '{SMILES}' (to_initialize={to_initialize}). ---")
         return fragment
 
     except Exception as e:
-        print(f"--- 🛠️ _get_fragment: 错误: 无法从 SMILES '{SMILES}' 创建 Fragment: {e} ---")
+        print(f"--- 🛠️ _get_fragment: Error: Unable to create Fragment from SMILES '{SMILES}': {e} ---")
         raise e
 
 def create_fragment_from_plan(
@@ -657,7 +657,7 @@ def create_fragment_from_plan(
     plan_dict: dict,
     to_initialize: int = 1
 ) -> Fragment:
-    print(f"--- 🛠️ 正在执行 create_fragment_from_plan ... ---")
+    print(f"--- 🛠️ Executing create_fragment_from_plan ... ---")
 
     # 从规划字典中提取所需信息
     plan_solution = plan_dict.get("solution", {})
@@ -666,7 +666,7 @@ def create_fragment_from_plan(
     num_binding_indices = len(binding_atom_indices)
 
     if not site_type or not adsorbate_type:
-        raise ValueError("plan_dict 缺少 'site_type' 或 'adsorbate_type'。")
+        raise ValueError("plan_dict missing 'site_type' or 'adsorbate_type'.")
     
     # 1. 内部调用 SMILES 生成器
     surrogate_smiles = generate_surrogate_smiles(
@@ -683,9 +683,9 @@ def create_fragment_from_plan(
         to_initialize=to_initialize
     )
     
-    # 确保 fragment 对象有一个 .info 字典
+    # Ensure fragment object has an .info dictionary
     if not hasattr(fragment, "info"):
-        print("--- 🛠️ 原生 Fragment 对象缺少 .info 字典，正在添加... ---")
+        print("--- 🛠️ Native Fragment object missing .info dictionary, adding it... ---")
         fragment.info = {}
 
     # 3. 关键：将原始规划信息附加到 Fragment 对象上
@@ -694,7 +694,7 @@ def create_fragment_from_plan(
     fragment.info["plan_binding_atom_indices"] = binding_atom_indices
     fragment.info["plan_adsorbate_type"] = adsorbate_type
     
-    print(f"--- 🛠️ create_fragment_from_plan: 成功创建并标记了 Fragment 对象。 ---")
+    print(f"--- 🛠️ create_fragment_from_plan: Successfully created and tagged Fragment object. ---")
     return fragment
 
 def _bump_adsorbate_to_safe_distance(slab_atoms: ase.Atoms, full_atoms: ase.Atoms, min_dist_threshold: float = 1.5) -> ase.Atoms:
@@ -722,9 +722,9 @@ def _bump_adsorbate_to_safe_distance(slab_atoms: ase.Atoms, full_atoms: ase.Atom
         # 我们希望 min_d 至少是 min_dist_threshold
         # 简单的策略：逐步抬升，或者直接一次性抬升 (threshold - min_d) + buffer
         # 考虑到几何形状复杂，直接加 Z 是最安全的
-        bump_height = (min_dist_threshold - min_d) + 0.2 # 额外加 0.2 A 缓冲
+        bump_height = (min_dist_threshold - min_d) + 0.2 # Extra 0.2 A buffer
         
-        print(f"--- 🛡️ 碰撞检测: 发现原子重叠 (min_dist={min_d:.2f} Å < {min_dist_threshold} Å)。正在抬升 {bump_height:.2f} Å... ---")
+        print(f"--- 🛡️ Collision Detected: Atom overlap found (min_dist={min_d:.2f} Å < {min_dist_threshold} Å). Bumping up by {bump_height:.2f} Å... ---")
         
         # 修改吸附物坐标
         full_atoms.positions[adsorbate_indices, 2] += bump_height
@@ -737,9 +737,9 @@ def populate_surface_with_fragment(
     plan_solution: dict,
     **kwargs
 ) -> str:
-    # --- 1. 从 Fragment 对象中检索规划 ---
+    # --- 1. Retrieve plan from Fragment object ---
     if not hasattr(fragment_object, "info") or "plan_site_type" not in fragment_object.info:
-        raise ValueError("Fragment 对象缺少 'plan_site_type' 信息。")
+        raise ValueError("Fragment object missing 'plan_site_type' info.")
 
     # --- 从规划中读取参数 (或使用默认值) ---
     raw_site_type = plan_solution.get("site_type", "all")
@@ -752,7 +752,7 @@ def populate_surface_with_fragment(
     overlap_thr = plan_solution.get("overlap_thr", 0.1)
     touch_sphere_size = plan_solution.get("touch_sphere_size", 2)
 
-    print(f"--- 🛠️ 正在初始化表面 (touch_sphere_size={touch_sphere_size})... ---")
+    print(f"--- 🛠️ Initializing Surface (touch_sphere_size={touch_sphere_size})... ---")
     
     # 为了安全起见，这里再次清理元数据，确保 autoadsorbate 接收到纯净的 Atoms 对象
     symbols = slab_atoms.get_chemical_symbols()
@@ -771,14 +771,14 @@ def populate_surface_with_fragment(
 
     original_site_count = len(s.site_df)
     s.sym_reduce()
-    print(f"--- 🛠️ 表面位点：从 {original_site_count} 个减少到 {len(s.site_df)} 个不等价位点。 ---")
+    print(f"--- 🛠️ Surface Sites: Reduced from {original_site_count} to {len(s.site_df)} inequivalent sites. ---")
 
     # 检查是否找到了位点
     # 这可以防止在 `s.site_df.connectivity` 上失败
     if s.site_df.empty or len(s.site_df) == 0:
         raise ValueError(
-            f"Autoadsorbate 未能在表面上找到任何吸附位点 (0 sites found)。"
-            f"这可能是由于 `touch_sphere_size` ({touch_sphere_size}) 不合适（太大或太小）。"
+            f"Autoadsorbate failed to find any adsorption sites on the surface (0 sites found). "
+            f"This might be due to inappropriate `touch_sphere_size` ({touch_sphere_size}) (too large or too small)."
         )
 
     # --- 2. 验证规划与位点的兼容性 (Connectivity 过滤) ---
@@ -792,13 +792,13 @@ def populate_surface_with_fragment(
     elif site_type == "all":
         site_df_filtered = s.site_df
     else:
-        raise ValueError(f"未知的 site_type: '{site_type}'。")
+        raise ValueError(f"Unknown site_type: '{site_type}'.")
 
     # --- 3. 可选的表面原子过滤 ---
     allowed_symbols = plan_solution.get("surface_binding_atoms")
     if allowed_symbols and len(allowed_symbols) > 0:
-        # 使用排序后的字符串做日志，清晰明了
-        print(f"--- 🛠️ 正在按表面符号过滤 (严格匹配): {sorted(allowed_symbols)} ---")
+        # Use sorted string for logging, clear and concise
+        print(f"--- 🛠️ Filtering by surface symbols (strict match): {sorted(allowed_symbols)} ---")
         
         # 预先计算目标的原子计数 (例如: {'Mo': 2, 'Pd': 1})
         target_counts = Counter(allowed_symbols)
@@ -824,26 +824,26 @@ def populate_surface_with_fragment(
         site_df_filtered = site_df_filtered[
             site_df_filtered['site_formula'].apply(check_symbols)
         ]
-        print(f"--- 🛠️ 表面符号过滤：位点从 {initial_count} 个减少到 {len(site_df_filtered)} 个。 ---")
+        print(f"--- 🛠️ Surface Symbol Filter: Sites reduced from {initial_count} to {len(site_df_filtered)}. ---")
 
     # 将 s.site_df 替换为过滤后的 df
     s.site_df = site_df_filtered
     site_index_arg = list(s.site_df.index)
     
-    print(f"--- 🛠️ 规划已验证：正在搜索 {len(site_index_arg)} 个 '{site_type}' (过滤后) 位点。 ---")
+    print(f"--- 🛠️ Plan Verified: Searching {len(site_index_arg)} '{site_type}' (filtered) sites. ---")
 
     if len(site_index_arg) == 0:
-        raise ValueError(f"未找到 '{site_type}' 类型且包含 {allowed_symbols} 的位点。无法继续。")
+        raise ValueError(f"No sites of type '{site_type}' containing {allowed_symbols} found. Cannot proceed.")
 
     # --- 4. 决定 sample_rotation ---
     sample_rotation = True
     num_binding_indices = len(fragment_object.info["plan_binding_atom_indices"])
     if num_binding_indices == 2:
-        print("--- 🛠️ 检测到 2-index (side-on) 模式。禁用 sample_rotation。---")
+        print("--- 🛠️ 2-index (side-on) mode detected. Disabling sample_rotation. ---")
         sample_rotation = False
 
-    # --- 5. 调用库 ---
-    print(f"--- 🛠️ 正在调用 s.get_populated_sites (cap={conformers_per_site_cap}, overlap={overlap_thr})... ---")
+    # --- 5. Call library ---
+    print(f"--- 🛠️ Calling s.get_populated_sites (cap={conformers_per_site_cap}, overlap={overlap_thr})... ---")
     
     raw_out_trj = s.get_populated_sites(
       fragment=fragment_object,
@@ -858,7 +858,7 @@ def populate_surface_with_fragment(
     # 针对 Bridge 和 Hollow 位点，预先抬升 0.5 Å
     # 原因：autoadsorbate 默认生成的初始距离对于大分子或多位点吸附往往太近，导致频繁触发碰撞修正。
     if site_type in ["bridge", "hollow"]:
-        print(f"--- 🛠️ 几何优化: 为 {site_type} 位点预抬升吸附物 0.5 Å 以减少碰撞... ---")
+        print(f"--- 🛠️ Geometry Optimization: Pre-lifting adsorbate by 0.5 Å for {site_type} site to reduce collisions... ---")
         for atoms in raw_out_trj:
             # 找到吸附物原子的索引 (假设最后加入的是吸附物)
             n_slab = len(slab_atoms)
@@ -873,10 +873,10 @@ def populate_surface_with_fragment(
     
     out_trj = safe_out_trj
 
-    print(f"--- 🛠️ 成功生成了 {len(out_trj)} 个初始构型。 ---")
+    print(f"--- 🛠️ Successfully generated {len(out_trj)} initial configurations. ---")
     
     if not out_trj:
-        raise ValueError(f"get_populated_sites 未能生成任何构型。可能是因为 overlap_thr ({overlap_thr}) 太严格。")
+        raise ValueError(f"get_populated_sites failed to generate any configurations. overlap_thr ({overlap_thr}) might be too strict.")
     
     # 将 ase.Atoms 列表保存到 Trajectory 对象中
     if not os.path.exists('outputs'):
@@ -888,7 +888,7 @@ def populate_surface_with_fragment(
         traj.write(atoms)
     traj.close()
 
-    print(f"--- 🛠️ 构型已保存到 {traj_file} ---")
+    print(f"--- 🛠️ Configurations saved to {traj_file} ---")
     return traj_file
 
 def relax_atoms(
@@ -904,11 +904,11 @@ def relax_atoms(
     mace_precision: str = "float32",
     use_dispersion: bool = False
 ) -> str:
-    print(f"--- 🛠️ 正在初始化 MACE 计算器 (Model: {mace_model}, Device: {mace_device})... ---")
+    print(f"--- 🛠️ Initializing MACE Calculator (Model: {mace_model}, Device: {mace_device})... ---")
     try:
         calculator = mace_mp(model=mace_model, device=mace_device, default_dtype=mace_precision, dispersion=use_dispersion)
     except Exception as e:
-        print(f"--- 🛑 MACE 初始化失败: {e} ---")
+        print(f"--- 🛑 MACE Initialization Failed: {e} ---")
         raise
 
     if not os.path.exists('outputs'):
@@ -944,8 +944,8 @@ def relax_atoms(
         formed = (~bonds_initial) & bonds_final_strict
         return int(np.sum(np.triu(broken | formed)))
     
-    # --- 1. 评估阶段 (预热 + 单点能量) ---
-    print(f"--- 🛠️ 评估阶段：正在评估 {len(atoms_list)} 个构型 (MD 预热 + SP 能量)... ---")
+    # --- 1. Evaluation Phase (Warmup + SP Energy) ---
+    print(f"--- 🛠️ Evaluation Phase: Evaluating {len(atoms_list)} configurations (MD Warmup + SP Energy)... ---")
     evaluated_configs = []
     for i, atoms in enumerate(atoms_list):
         atoms.calc = calculator
@@ -953,7 +953,7 @@ def relax_atoms(
         
         max_force = np.max(np.linalg.norm(atoms.get_forces(), axis=1))
         if max_force > 200.0:
-            print(f"--- ⚠️ 跳过结构 {i+1}: 初始力过大 (Max Force = {max_force:.2f} eV/A)... ---")
+            print(f"--- ⚠️ Skipping structure {i+1}: Initial force too high (Max Force = {max_force:.2f} eV/A)... ---")
             continue
 
         if md_steps > 0:
@@ -965,25 +965,25 @@ def relax_atoms(
 
         # --- 能量 sanity check，屏蔽非物理爆炸结构 ---
         if (not np.isfinite(energy)) or energy < -2000.0:
-            print(f"--- ⚠️ 跳过结构 {i+1}: 能量异常 (E = {energy:.2f} eV)，疑似数值崩溃 ---")
+            print(f"--- ⚠️ Skipping structure {i+1}: Abnormal energy (E = {energy:.2f} eV), suspected numerical collapse ---")
             continue
 
-        print(f"--- 评估结构 {i+1}/{len(atoms_list)}... 能量 (预热后): {energy:.4f} eV ---")
-        evaluated_configs.append((energy, i, atoms.copy())) # 存储副本
+        print(f"--- Evaluating structure {i+1}/{len(atoms_list)}... Energy (after warmup): {energy:.4f} eV ---")
+        evaluated_configs.append((energy, i, atoms.copy())) # Store copy
 
     if not evaluated_configs:
-        raise ValueError("评估阶段未能成功评估任何构型。")
+        raise ValueError("Evaluation phase failed to evaluate any configurations.")
 
     # --- 2. 选择最佳 ---
     evaluated_configs.sort(key=lambda x: x[0]) # 按能量排序
     
     if N_RELAX_TOP_N > len(evaluated_configs):
-        print(f"--- 🛠️ 警告: 请求弛豫 top {N_RELAX_TOP_N}，但只有 {len(evaluated_configs)} 个可用。将弛豫所有。 ---")
+        print(f"--- 🛠️ Warning: Requested to relax top {N_RELAX_TOP_N}, but only {len(evaluated_configs)} available. Relaxing all. ---")
         N_RELAX_TOP_N = len(evaluated_configs)
     
     configs_to_relax = evaluated_configs[:N_RELAX_TOP_N]
     
-    print(f"--- 🛠️ 评估完成。将从 {len(atoms_list)} 个构型中弛豫最好的 {N_RELAX_TOP_N} 个。---")
+    print(f"--- 🛠️ Evaluation complete. Relaxing best {N_RELAX_TOP_N} of {len(atoms_list)} configurations. ---")
     
     # --- 3. 弛豫阶段 (仅 N_RELAX_TOP_N) ---
     traj_file = f"outputs/relaxation_run.traj"
@@ -991,7 +991,7 @@ def relax_atoms(
     final_structures = []
 
     for i, (initial_energy, original_index, atoms) in enumerate(configs_to_relax):
-        print(f"--- 弛豫最佳结构 {i+1}/{N_RELAX_TOP_N} (原始 Index {original_index}, 初始能量: {initial_energy:.4f} eV) ---")
+        print(f"--- Relaxing best structure {i+1}/{N_RELAX_TOP_N} (Original Index {original_index}, Initial Energy: {initial_energy:.4f} eV) ---")
         
         atoms.calc = calculator
         atoms.set_constraint(constraint)
@@ -1000,7 +1000,7 @@ def relax_atoms(
         adsorbate_indices = list(range(len(slab_indices), len(atoms)))
         initial_adsorbate = atoms.copy()[adsorbate_indices]
         
-        print(f"--- 优化 (BFGS): fmax={fmax}, steps={steps} ---")
+        print(f"--- Optimization (BFGS): fmax={fmax}, steps={steps} ---")
         dyn_opt = BFGS(atoms, trajectory=None, logfile=None) 
         dyn_opt.attach(lambda: traj.write(atoms), interval=1)
         dyn_opt.run(fmax=fmax, steps=steps)
@@ -1009,11 +1009,11 @@ def relax_atoms(
         final_adsorbate = atoms.copy()[adsorbate_indices]
         bond_change_count = _get_bond_change_count(initial_adsorbate, final_adsorbate)
         atoms.info["bond_change_count"] = bond_change_count
-        print(f"--- 键完整性检查: 检测到 {bond_change_count} 个键发生了变化。 ---")
+        print(f"--- Bond Integrity Check: Detected {bond_change_count} bond changes. ---")
         
         final_energy = atoms.get_potential_energy()
         final_forces = atoms.get_forces()
-        print(f"--- 最佳结构 {i+1} 弛豫完成。最终能量: {final_energy:.4f} eV ---")
+        print(f"--- Best structure {i+1} relaxation complete. Final Energy: {final_energy:.4f} eV ---")
 
         atoms.results = {
             'energy': final_energy,
@@ -1029,10 +1029,10 @@ def relax_atoms(
     try:
         write(final_traj_file, final_structures)
     except Exception as e:
-        print(f"--- 🛑 写入 final_relaxed_structures.xyz 失败: {e} ---")
+        print(f"--- 🛑 Failed to write final_relaxed_structures.xyz: {e} ---")
         raise
     
-    print(f"--- 🛠️ 弛豫完成。完整轨迹: {traj_file} | 最终结构 ({len(final_structures)}): {final_traj_file} ---")
+    print(f"--- 🛠️ Relaxation complete. Full Trajectory: {traj_file} | Final Structures ({len(final_structures)}): {final_traj_file} ---")
     return final_traj_file
 
 def save_ase_atoms(atoms: ase.Atoms, filename: str) -> str:
@@ -1044,10 +1044,10 @@ def save_ase_atoms(atoms: ase.Atoms, filename: str) -> str:
     
     try:
         write(filename, atoms)
-        print(f"--- 🛠️ 成功将结构保存到 {filename} ---")
-        return f"已保存到 {filename}"
+        print(f"--- 🛠️ Successfully saved structure to {filename} ---")
+        return f"Saved to {filename}"
     except Exception as e:
-        print(f"--- 🛠️ 错误: 无法保存 Atoms 到 {filename}: {e} ---")
+        print(f"--- 🛠️ Error: Unable to save Atoms to {filename}: {e} ---")
         raise
 
 def analyze_relaxation_results(
@@ -1059,15 +1059,15 @@ def analyze_relaxation_results(
     e_adsorbate_ref: float = 0.0
 ) -> str:
     try:
-        print(f"--- 🛠️ 正在分析弛豫结果: {relaxed_trajectory_file} ---")
+        print(f"--- 🛠️ Analyzing relaxation results: {relaxed_trajectory_file} ---")
 
         try:
             traj = read(relaxed_trajectory_file, index=":")
         except Exception as e_read:
-            return json.dumps({"status": "error", "message": f"无法读取轨迹文件 (可能是文件损坏): {e_read}"})
+            return json.dumps({"status": "error", "message": f"Unable to read trajectory file (possibly corrupted): {e_read}"})
         
         if len(traj) == 0:
-            return json.dumps({"status": "error", "message": "弛豫轨迹为空或无法读取。"})
+            return json.dumps({"status": "error", "message": "Relaxation trajectory is empty or unreadable."})
 
         # 1. 找到最稳定的构型
         energies = []
@@ -1127,7 +1127,7 @@ def analyze_relaxation_results(
         # 如果分子碎成了 n 块 (n > 1)，说明至少断了 (n-1) 个键。
         # 防止出现 "is_dissociated=True" 但 "bond_change_count=0" 的矛盾。
         if is_dissociated and bond_change_count == 0:
-            print(f"--- 🛠️ 修正逻辑矛盾: 检测到解离 (n_components={n_components}) 但 bond_change_count=0。强制修正。 ---")
+            print(f"--- 🛠️ Logic Contradiction Fix: Dissociation detected (n_components={n_components}) but bond_change_count=0. Forcing fix. ---")
             bond_change_count = max(1, n_components - 1)
 
         # 7. 综合判定反应性
@@ -1189,7 +1189,7 @@ def analyze_relaxation_results(
         # 物理一致性强制修正 (Sanity Check)
         # 如果能量很低 (强吸附)，但几何判定为 desorbed，这一定是几何判据太严，强制修正为 chemisorbed
         if actual_site_type == "desorbed" and E_ads < -0.5:
-            print(f"--- 🛠️ 物理修正: 检测到强吸附能 ({E_ads:.2f} eV) 但几何判定为脱附。强制修正为 'hollow/promiscuous'。 ---")
+            print(f"--- 🛠️ Physical Correction: Strong adsorption energy ({E_ads:.2f} eV) detected but geometrically desorbed. Forcing 'hollow/promiscuous'. ---")
             actual_site_type = "hollow (inferred)"
             # 保持 actual_connectivity 为 0 或手动设为 3，防止 Agent 困惑
             if actual_connectivity == 0: actual_connectivity = 3
@@ -1239,13 +1239,13 @@ def analyze_relaxation_results(
                 else:
                     site_crystallography = "(Unknown Layer)"
             except Exception as e_cryst:
-                print(f"--- ⚠️ 晶体学分析警告: {e_cryst} ---")
+                print(f"--- ⚠️ Crystallographic Analysis Warning: {e_cryst} ---")
         
         # 将此后缀添加到 actual_site_type 中，以便 Agent 能看到区别
         if site_crystallography:
             actual_site_type += f" {site_crystallography}"
         
-        print(f"--- 分析: 位点滑移检查：规划 {planned_site_type} (conn={planned_connectivity}), 实际 {actual_site_type} (conn={actual_connectivity}) ---")
+        print(f"--- Analysis: Site Slip Check: Planned {planned_site_type} (conn={planned_connectivity}), Actual {actual_site_type} (conn={actual_connectivity}) ---")
 
         # 2. 识别吸附物原子和表面原子
         
@@ -1263,7 +1263,7 @@ def analyze_relaxation_results(
             target_atom_symbol = relaxed_atoms[target_atom_global_index].symbol
             target_atom_pos = relaxed_atoms[target_atom_global_index].position
 
-            print(f"--- 分析: (1-index 模式) 正在检查第一个吸附物原子, 符号: '{target_atom_symbol}', 全局索引: {target_atom_global_index}。---")
+            print(f"--- Analysis: (1-index mode) Checking first adsorbate atom, Symbol: '{target_atom_symbol}', Global Index: {target_atom_global_index}. ---")
 
             # --- 寻找所有成键的表面原子，而不仅仅是最近的一个 ---
             bonded_surface_atoms = []
@@ -1309,7 +1309,7 @@ def analyze_relaxation_results(
             if is_bound:
                 bonded_desc = ", ".join([f"{item['symbol']}-{item['distance']}Å" for item in bonded_surface_atoms])
             else:
-                bonded_desc = "无"
+                bonded_desc = "None"
             
             # 估算最近原子的 cutoff 用于报告
             nearest_radius_sum = cov_cutoffs[target_atom_global_index] + cov_cutoffs[nearest_slab_atom_global_index]
@@ -1328,16 +1328,16 @@ def analyze_relaxation_results(
             if planned_symbols and bonded_surface_atoms:
                 if planned_symbols != actual_symbols:
                     is_chemical_slip = True
-                    print(f"--- ⚠️ 警告: 检测到化学位点滑移! 规划: {planned_symbols} -> 实际: {actual_symbols} ---")
+                    print(f"--- ⚠️ Warning: Chemical Site Slip Detected! Planned: {planned_symbols} -> Actual: {actual_symbols} ---")
 
             analysis_message = (
-                f"最稳定构型吸附能: {E_ads:.4f} eV。"
-                f"目标原子: {target_atom_symbol} (来自规划索引 {binding_atom_indices[0]}，在弛豫结构中为全局索引 {target_atom_global_index})。"
-                f"  -> 最近: {nearest_slab_atom_symbol} (Index {nearest_slab_atom_global_index}), 距离: {round(min_distance, 3)} Å (阈值: {round(bonding_cutoff, 3)}), 成键: {is_bound}。"
-                f"成键表面原子: {bonded_desc}。 "
-                f"是否成键: {is_bound}。"
-                f"是否发生反应性转变: {reaction_detected} (键变化数: {bond_change_count} )。"
-                f"化学滑移: {is_chemical_slip} (规划 {planned_symbols} -> 实际 {actual_symbols})。"
+                f"Most stable config adsorption energy: {E_ads:.4f} eV. "
+                f"Target Atom: {target_atom_symbol} (from plan index {binding_atom_indices[0]}, global index {target_atom_global_index} in relaxed structure). "
+                f"  -> Nearest: {nearest_slab_atom_symbol} (Index {nearest_slab_atom_global_index}), Distance: {round(min_distance, 3)} Å (Threshold: {round(bonding_cutoff, 3)}), Bound: {is_bound}. "
+                f"Bonded Surface Atoms: {bonded_desc}. "
+                f"Is Bound: {is_bound}. "
+                f"Reactivity Change Detected: {reaction_detected} (Bond Changes: {bond_change_count}). "
+                f"Chemical Slip: {is_chemical_slip} (Planned {planned_symbols} -> Actual {actual_symbols})."
             )
 
             result = {
@@ -1370,7 +1370,7 @@ def analyze_relaxation_results(
         
         elif num_binding_indices == 2:
             if len(adsorbate_indices) < 2:
-                 return json.dumps({"status": "error", "message": f"Side-on 模式需要至少 2 个吸附物原子，但只找到 {len(adsorbate_indices)} 个。"})
+                 return json.dumps({"status": "error", "message": f"Side-on mode requires at least 2 adsorbate atoms, but found {len(adsorbate_indices)}."})
             
             # 目标原子 *总是* 吸附物列表中的前两个
             
@@ -1378,7 +1378,7 @@ def analyze_relaxation_results(
             target_atom_global_index = adsorbate_indices[0]
             target_atom_symbol = relaxed_atoms[target_atom_global_index].symbol
             target_atom_pos = relaxed_atoms[target_atom_global_index].position
-            print(f"--- 分析: (2-index 模式) 正在检查第一个吸附物原子, 符号: '{target_atom_symbol}', 全局索引: {target_atom_global_index}。---")
+            print(f"--- Analysis: (2-index mode) Checking first adsorbate atom, Symbol: '{target_atom_symbol}', Global Index: {target_atom_global_index}. ---")
 
             distances = np.linalg.norm(slab_atoms.positions - target_atom_pos, axis=1)
             min_distance = np.min(distances)
@@ -1393,7 +1393,7 @@ def analyze_relaxation_results(
             second_atom_global_index = adsorbate_indices[1]
             second_atom_symbol = relaxed_atoms[second_atom_global_index].symbol
             second_atom_pos = relaxed_atoms[second_atom_global_index].position
-            print(f"--- 分析: (side-on 模式) 正在检查第二个吸附物原子, 符号: '{second_atom_symbol}', 全局索引: {second_atom_global_index}。---")
+            print(f"--- Analysis: (side-on mode) Checking second adsorbate atom, Symbol: '{second_atom_symbol}', Global Index: {second_atom_global_index}. ---")
             
             distances_2 = np.linalg.norm(slab_atoms.positions - second_atom_pos, axis=1)
             min_distance_2 = np.min(distances_2)
@@ -1453,7 +1453,7 @@ def analyze_relaxation_results(
             if bonded_surface_atoms:
                 bonded_desc = ", ".join([f"{b['adsorbate_atom']}-{b['symbol']}({b['distance']}Å)" for b in bonded_surface_atoms])
             else:
-                bonded_desc = "无"
+                bonded_desc = "None"
 
             # 化学滑移检测 (Chemical Slip Detection)
             # 1. 获取规划的表面原子符号 (排序以忽略顺序差异)
@@ -1468,19 +1468,19 @@ def analyze_relaxation_results(
             if planned_symbols and bonded_surface_atoms:
                 if planned_symbols != actual_symbols:
                     is_chemical_slip = True
-                    print(f"--- ⚠️ 警告: 检测到化学位点滑移! 规划: {planned_symbols} -> 实际: {actual_symbols} ---")
+                    print(f"--- ⚠️ Warning: Chemical Site Slip Detected! Planned: {planned_symbols} -> Actual: {actual_symbols} ---")
             # === 🩹 修复结束 ===
 
             analysis_message = (
-                f"最稳定构型吸附能: {E_ads:.4f} eV。"
-                f"目标原子 1: {target_atom_symbol} (来自规划索引 {binding_atom_indices[0]}，全局索引 {target_atom_global_index})。"
-                f"  -> 最近: {nearest_slab_atom_symbol} (Index {nearest_slab_atom_global_index}), 距离: {round(min_distance, 3)} Å (阈值: {round(bonding_cutoff, 3)}), 成键: {is_bound_1}。"
-                f"目标原子 2: {second_atom_symbol} (来自规划索引 {binding_atom_indices[1]}，全局索引 {second_atom_global_index})。"
-                f"  -> 最近: {nearest_slab_atom_symbol_2} (Index {nearest_slab_atom_global_index_2}), 距离: {round(min_distance_2, 3)} Å (阈值: {round(bonding_cutoff_2, 3)}), 成键: {is_bound_2}。"
-                f"成键表面原子: {bonded_desc}。 "
-                f"是否成键: {is_bound}。"
-                f"是否发生反应性转变: {reaction_detected} (键变化数: {bond_change_count} )。"
-                f"化学滑移: {is_chemical_slip} (规划 {planned_symbols} -> 实际 {actual_symbols})。"
+                f"Most stable config adsorption energy: {E_ads:.4f} eV. "
+                f"Target Atom 1: {target_atom_symbol} (from plan index {binding_atom_indices[0]}, global index {target_atom_global_index}). "
+                f"  -> Nearest: {nearest_slab_atom_symbol} (Index {nearest_slab_atom_global_index}), Distance: {round(min_distance, 3)} Å (Threshold: {round(bonding_cutoff, 3)}), Bound: {is_bound_1}. "
+                f"Target Atom 2: {second_atom_symbol} (from plan index {binding_atom_indices[1]}, global index {second_atom_global_index}). "
+                f"  -> Nearest: {nearest_slab_atom_symbol_2} (Index {nearest_slab_atom_global_index_2}), Distance: {round(min_distance_2, 3)} Å (Threshold: {round(bonding_cutoff_2, 3)}), Bound: {is_bound_2}. "
+                f"Bonded Surface Atoms: {bonded_desc}. "
+                f"Is Bound: {is_bound}. "
+                f"Reactivity Change Detected: {reaction_detected} (Bond Changes: {bond_change_count}). "
+                f"Chemical Slip: {is_chemical_slip} (Planned {planned_symbols} -> Actual {actual_symbols})."
             )
 
             result = {
@@ -1519,7 +1519,7 @@ def analyze_relaxation_results(
             }
 
         else:
-             return json.dumps({"status": "error", "message": f"分析失败：不支持的键合索引数量 {num_binding_indices}。"})
+             return json.dumps({"status": "error", "message": f"Analysis failed: Unsupported number of binding indices {num_binding_indices}."})
 
         # 6. 保存最终结构
         # 防止文件名冲突导致覆盖历史最优解。
@@ -1540,16 +1540,16 @@ def analyze_relaxation_results(
         
         try:
             write(best_atoms_filename, relaxed_atoms)
-            print(f"--- 🛠️ 成功将最佳结构保存到 {best_atoms_filename} ---")
-            # 将具体的文件名返回给 Agent，方便它在报告中引用
+            print(f"--- 🛠️ Successfully saved best structure to {best_atoms_filename} ---")
+            # Return specific filename to Agent for reference in report
             result["best_structure_file"] = best_atoms_filename
         except Exception as e:
-            print(f"--- 🛠️ 错误: 无法保存最佳结构到 {best_atoms_filename}: {e} ---")
+            print(f"--- 🛠️ Error: Unable to save best structure to {best_atoms_filename}: {e} ---")
 
         return json.dumps(result)
     
     except Exception as e:
         import traceback
-        print(f"--- 🛠️ 错误: 分析弛豫时发生意外异常: {e} ---")
+        print(f"--- 🛠️ Error: Unexpected exception during relaxation analysis: {e} ---")
         print(traceback.format_exc())
-        return json.dumps({"status": "error", "message": f"分析弛豫时发生意外异常: {e}"})
+        return json.dumps({"status": "error", "message": f"Unexpected exception during relaxation analysis: {e}"})

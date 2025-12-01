@@ -108,12 +108,12 @@ def make_plan_key(plan_json: Optional[dict]) -> Optional[str]:
         key = f"{site_type}|{surf_atoms_str}|{ads_indices_str}|{ads_type}|{float(touch_sphere):.1f}"
         return key
     except Exception as e:
-        print(f"--- ⚠️ make_plan_key 失败: {e} ---")
+        print(f"--- ⚠️ make_plan_key failed: {e} ---")
         return None
 
 # --- 3. 定义 LangGraph 节点 ---
 def pre_processor_node(state: AgentState) -> dict:
-    print("--- 🔬 调用 Pre-Processor 节点 ---")
+    print("--- 🔬 Calling Pre-Processor Node ---")
     try:
         analysis = analyze_surface_sites(state["slab_path"])
         return {
@@ -121,8 +121,8 @@ def pre_processor_node(state: AgentState) -> dict:
             "available_sites_description": analysis["available_sites_description"]
         }
     except Exception as e:
-        error_message = f"错误: 无法读取 Slab 文件 '{state['slab_path']}': {e}"
-        print(f"--- 验证失败: {error_message} ---")
+        error_message = f"Error: Unable to read Slab file '{state['slab_path']}': {e}"
+        print(f"--- Validation Failed: {error_message} ---")
         return {
             "validation_error": error_message,
             "surface_composition": None,
@@ -130,7 +130,7 @@ def pre_processor_node(state: AgentState) -> dict:
         }
 
 def solution_planner_node(state: AgentState) -> dict:
-    print("--- 🧠 调用 Planner 节点 ---")
+    print("--- 🧠 Calling Planner Node ---")
     llm = get_llm()
     messages = []
 
@@ -147,21 +147,21 @@ def solution_planner_node(state: AgentState) -> dict:
     prompt_input = {
         "smiles": state["smiles"],
         "slab_xyz_path": state["slab_path"],
-        "surface_composition": state.get("surface_composition", "未知"),
+        "surface_composition": state.get("surface_composition", "Unknown"),
         "user_request": state["user_request"],
-        "history": "\n".join(state["history"]) if state.get("history") else "无",
+        "history": "\n".join(state["history"]) if state.get("history") else "None",
         "MAX_RETRIES": MAX_RETRIES,
         "autoadsorbate_context": atom_menu_json,
-        "available_sites_description": state.get("available_sites_description", "无"),
+        "available_sites_description": state.get("available_sites_description", "None"),
     }
     
     if state.get("validation_error"):
         messages.append(HumanMessage(content=PLANNER_PROMPT.format(**prompt_input)))
         messages.append(AIMessage(content=json.dumps(state.get("plan", "{}"))))
-        messages.append(HumanMessage(content=f"你的方案存在逻辑错误: {state['validation_error']}. 请重新规划一个新方案。"))
+        messages.append(HumanMessage(content=f"Your plan has logical errors: {state['validation_error']}. Please replan."))
     else:
         if state.get("history"):
-            print(f"--- 🧠 Planner: 检测到失败历史，正在重试... ---")
+            print(f"--- 🧠 Planner: Detected failure history, retrying... ---")
         messages.append(HumanMessage(content=PLANNER_PROMPT.format(**prompt_input)))
 
     response = llm.invoke(messages)
@@ -174,33 +174,33 @@ def solution_planner_node(state: AgentState) -> dict:
             content_str = content_str[7:-3].strip()
         
         plan_json = parser.parse(content_str)
-        print(f"--- 🧠 Planner 方案已生成 ---")
+        print(f"--- 🧠 Planner Plan Generated ---")
         return {
             "plan": plan_json,
             "messages": [AIMessage(content=response.content)],
             "validation_error": None
         }
     except Exception as e:
-        print(f"--- 🛑 Planner 输出 JSON 解析失败: {e} ---")
-        print(f"--- 原始输出: {response.content} ---")
+        print(f"--- 🛑 Planner Output JSON Parse Failed: {e} ---")
+        print(f"--- Raw Output: {response.content} ---")
         return {
             "plan": None,
-            "validation_error": f"False, Planner 输出格式错误: {e}. 请严格按 JSON 格式输出。",
+            "validation_error": f"False, Planner output format error: {e}. Please output strictly in JSON format.",
             "messages": [AIMessage(content=response.content)]
         }
 
 def plan_validator_node(state: AgentState) -> dict:
-    """ 节点 2: Python 验证器 """
-    print("--- 🐍 调用 Python 验证器节点 ---")
+    """ Node 2: Python Validator """
+    print("--- 🐍 Calling Python Validator Node ---")
 
     try:
         # 使用 state["smiles"] (来自初始输入) 而不是 plan 中的任何内容
         mol = Chem.MolFromSmiles(state["smiles"])
         if not mol:
-            raise ValueError(f"RDKit 返回 None。SMILES 可能无效或包含 RDKit 无法处理的价态。")
+            raise ValueError(f"RDKit returned None. SMILES might be invalid or contain valences RDKit cannot handle.")
     except Exception as e:
-        error = f"False, 基础 SMILES 字符串 '{state['smiles']}' 无法被 RDKit 解析。这是一个无法修复的错误。请检查 SMLIES。错误: {e}"
-        print(f"--- 验证失败: {error} ---")
+        error = f"False, Base SMILES string '{state['smiles']}' cannot be parsed by RDKit. This is an unrecoverable error. Please check SMILES. Error: {e}"
+        print(f"--- Validation Failed: {error} ---")
         # 这是一个致命错误；我们应该停止重试。
         # 我们通过设置一个特殊的 validation_error 来通知路由
         # 注意：理想情况下，图应该有一个 "terminal_failure" 状态，
@@ -228,46 +228,46 @@ def plan_validator_node(state: AgentState) -> dict:
         print(f"--- Validation Failed: {error} ---")
         return {"validation_error": error}
     if solution.get("action") == "terminate":
-        print("--- 🛑 Planner 决定主动终止任务 (收敛或无更多方案) ---")
-        return {"validation_error": None}  # 直接通过，不再检查 site_type 等细节
+        print("--- 🛑 Planner decided to terminate (converged or no more plans) ---")
+        return {"validation_error": None}  # Pass directly
 
     site_type = solution.get("site_type", "")
     surf_atoms = solution.get("surface_binding_atoms", [])
     ads_indices = solution.get("adsorbate_binding_indices", [])
     if site_type == "ontop" and len(ads_indices) != 1:
-        error = f"False, Rule 2: Python check failed. site_type 'ontop' 必须与 1 个索引 (end-on) 配对，但提供了 {len(ads_indices)} 个。"
+        error = f"False, Rule 2: Python check failed. site_type 'ontop' must pair with 1 index (end-on), but got {len(ads_indices)}."
         print(f"--- Validation Failed: {error} ---")
         return {"validation_error": error}
     if site_type == "bridge" and len(ads_indices) not in [1, 2]:
-        error = f"False, Rule 2: Python check failed. site_type 'bridge' 必须与 1 个 (end-on) 或 2 个 (side-on) 索引配对，但提供了 {len(ads_indices)} 个。"
+        error = f"False, Rule 2: Python check failed. site_type 'bridge' must pair with 1 (end-on) or 2 (side-on) indices, but got {len(ads_indices)}."
         print(f"--- Validation Failed: {error} ---")
         return {"validation_error": error}
     if site_type == "hollow" and len(ads_indices) not in [1, 2]:
-        error = f"False, Rule 2: Python check failed. site_type 'hollow' 必须与 1 个 (end-on) 或 2 个 (side-on) 索引配对，但提供了 {len(ads_indices)} 个。"
+        error = f"False, Rule 2: Python check failed. site_type 'hollow' must pair with 1 (end-on) or 2 (side-on) indices, but got {len(ads_indices)}."
         print(f"--- Validation Failed: {error} ---")
         return {"validation_error": error}
     if not isinstance(surf_atoms, list):
-        error = "False, Plan JSON field 'surface_binding_atoms' 必须是列表。"
+        error = "False, Plan JSON field 'surface_binding_atoms' must be a list."
         print(f"--- Validation Failed: {error} ---")
         return {"validation_error": error}
     if site_type == "ontop" and len(surf_atoms) != 1:
         error = (
-            "False, Rule 2b: 'ontop' 位点要求 surface_binding_atoms 长度为 1，"
-            f"但当前为 {len(surf_atoms)}。"
+            "False, Rule 2b: 'ontop' site requires surface_binding_atoms length of 1, "
+            f"but got {len(surf_atoms)}."
         )
         print(f"--- Validation Failed: {error} ---")
         return {"validation_error": error}
     if site_type == "bridge" and len(surf_atoms) not in [1, 2]:
         error = (
-            "False, Rule 2b: 'bridge' 位点要求 surface_binding_atoms 长度为 1 或 2，"
-            f"但当前为 {len(surf_atoms)}。"
+            "False, Rule 2b: 'bridge' site requires surface_binding_atoms length of 1 or 2, "
+            f"but got {len(surf_atoms)}."
         )
         print(f"--- Validation Failed: {error} ---")
         return {"validation_error": error}
     if site_type == "hollow" and len(surf_atoms) < 3:
         error = (
-            "False, Rule 2b: 'hollow' 位点要求 surface_binding_atoms 至少包含 3 个元素，"
-            f"但当前为 {len(surf_atoms)}。"
+            "False, Rule 2b: 'hollow' site requires surface_binding_atoms to have at least 3 elements, "
+            f"but got {len(surf_atoms)}."
         )
         print(f"--- Validation Failed: {error} ---")
         return {"validation_error": error}
@@ -279,26 +279,26 @@ def plan_validator_node(state: AgentState) -> dict:
         key = make_plan_key(plan_json)
         if key is not None and key in attempted_keys:
             error = (
-                "False, 该方案在 (site_type, surface_binding_atoms, adsorbate_binding_indices) "
-                "空间中已经尝试过，请规划一个不同的组合。"
+                "False, This plan has already been attempted in the (site_type, surface_binding_atoms, adsorbate_binding_indices) space. "
+                "Please plan a different combination."
             )
             print(f"--- Validation Failed: {error} ---")
             return {"validation_error": error}
     except Exception as e_dup:
-        print(f"--- ⚠️ Duplicate-check 过程中出现异常: {e_dup} ---")
+        print(f"--- ⚠️ Exception during Duplicate-check: {e_dup} ---")
 
     print("--- Validation Succeeded ---")
     return {"validation_error": None}
 
 def tool_executor_node(state: AgentState) -> dict:
-    """ 节点 4: Tool Executor """
-    print("--- 🛠️ 调用 Tool Executor 节点 ---")
+    """ Node 4: Tool Executor """
+    print("--- 🛠️ Calling Tool Executor Node ---")
     
     plan_json = state.get("plan", {})
     plan_solution = plan_json.get("solution", {})
 
     if not plan_solution:
-        error_message = "Tool Executor 失败: 'plan' 中缺少 'solution' 字典。"
+        error_message = "Tool Executor Failed: 'plan' missing 'solution' dictionary."
         print(f"--- 🛑 {error_message} ---")
         return {
             "messages": [ToolMessage(content=error_message, tool_call_id="tool_executor")],
@@ -313,14 +313,14 @@ def tool_executor_node(state: AgentState) -> dict:
     new_best_dissociated = state.get("best_dissociated_result")
     
     try:
-        # 1. 读取原始 Slab
+        # 1. Read original Slab
         raw_slab_atoms = read_atoms_object(slab_path)
-        tool_logs.append(f"成功: 已从 {slab_path} 读取 slab 原子。")
+        tool_logs.append(f"Success: Read slab atoms from {slab_path}.")
 
-        # 2. 在计算任何能量之前，先统一处理 Slab
+        # 2. Prepare Slab before any energy calculation
         final_slab_atoms, is_expanded = prepare_slab(raw_slab_atoms)
         if is_expanded:
-            tool_logs.append("注意: 为了物理准确性，Slab 已被自动扩胞 (2x2)。")
+            tool_logs.append("Note: Slab was automatically expanded (2x2) for physical accuracy.")
         
         # 3. 初始化计算器
         try:
@@ -362,15 +362,15 @@ def tool_executor_node(state: AgentState) -> dict:
             e_surf_atoms = final_slab_atoms.copy()
             e_surf_atoms.calc = temp_calc
 
-            # *** 应用与 relax_atoms *完全一致* 的约束 ***
-            # tools.py::relax_atoms 固定了 *所有* 表面原子。
+            # *** Apply constraints EXACTLY as in relax_atoms ***
+            # tools.py::relax_atoms fixes *ALL* surface atoms.
             constraint = FixAtoms(indices=list(range(len(e_surf_atoms))))
             e_surf_atoms.set_constraint(constraint)
 
-            print(f"--- 🛠️ 正在计算裸表面的单点能 (所有原子已固定)... ---")
+            print(f"--- 🛠️ Calculating single point energy of bare surface (all atoms fixed)... ---")
 
-            E_surface = e_surf_atoms.get_potential_energy() # 这现在是一个单点能
-            tool_logs.append(f"Success: E_surface = {E_surface:.4f} eV。")
+            E_surface = e_surf_atoms.get_potential_energy() # This is now a single point energy
+            tool_logs.append(f"Success: E_surface = {E_surface:.4f} eV.")
             
         except Exception as e_surf_err:
             raise ValueError(f"Failed to calculate E_surface: {e_surf_err}")
@@ -398,44 +398,44 @@ def tool_executor_node(state: AgentState) -> dict:
             adsorbate_only_atoms.set_cell([20, 20, 20]) 
             adsorbate_only_atoms.center()
             
-            print(f"--- 🛠️ 正在弛豫孤立的 {state['smiles']} 分子... ---")
+            print(f"--- 🛠️ Relaxing isolated {state['smiles']} molecule... ---")
 
-            # 检测单原子分子。单原子在真空中没有内部自由度，势能面平坦，导致 BFGS 算法因力变化为0而除以零崩溃。
+            # Detect single atom molecule.
             if len(adsorbate_only_atoms) > 1:
-                # 协议 1: MD 预热 (与 relax_atoms 一致)
+                # Protocol 1: MD Warmup (Consistent with relax_atoms)
                 if md_steps > 0:
                     MaxwellBoltzmannDistribution(adsorbate_only_atoms, temperature_K=md_temp)
                     dyn_md_ads = Langevin(adsorbate_only_atoms, 1 * units.fs, temperature_K=md_temp, friction=0.01)
                     dyn_md_ads.run(md_steps)
                     
-                # 协议 2: BFGS 优化 (与 relax_atoms 一致)
+                # Protocol 2: BFGS Optimization (Consistent with relax_atoms)
                 BFGS(adsorbate_only_atoms, trajectory=None, logfile=None).run(fmax=opt_fmax, steps=opt_steps)
             else:
-                print(f"--- 🛠️ 检测到单原子吸附物 ({len(adsorbate_only_atoms)} atom)，跳过真空弛豫（物理上无需优化）。 ---")
+                print(f"--- 🛠️ Single atom adsorbate detected ({len(adsorbate_only_atoms)} atom), skipping vacuum relaxation. ---")
             
             E_adsorbate = adsorbate_only_atoms.get_potential_energy()
             tool_logs.append(f"Success: E_adsorbate = {E_adsorbate:.4f} eV.")
             
         except Exception as e_ads_err:
-            raise ValueError(f"计算 E_adsorbate 失败: {e_ads_err}")
+            raise ValueError(f"Failed to calculate E_adsorbate: {e_ads_err}")
 
-        # 7. 放置吸附物
+        # 7. Place adsorbate
         generated_traj_file = populate_surface_with_fragment(
             slab_atoms=final_slab_atoms,
             fragment_object=fragment_object,
             plan_solution=plan_solution
         )
-        tool_logs.append(f"成功: 已将片段放置在 slab 上。构型保存在: {generated_traj_file}")
+        tool_logs.append(f"Success: Fragment placed on slab. Configs saved to: {generated_traj_file}")
 
         initial_conformers = read(generated_traj_file, index=":")
         if not initial_conformers or len(initial_conformers) == 0:
-            raise ValueError(f"populate_surface_with_fragment 未能生成任何构型 (轨迹文件为空: {generated_traj_file})。")
+            raise ValueError(f"populate_surface_with_fragment failed to generate any configs (empty trajectory: {generated_traj_file}).")
         
-        # 8. 结构弛豫
-        print("--- ⏳ 开始结构弛豫... ---")
+        # 8. Structure Relaxation
+        print("--- ⏳ Starting structure relaxation... ---")
         slab_indices = list(range(len(final_slab_atoms)))
         relax_n = plan_solution.get("relax_top_n", 1)
-        print(f"--- 🛠️ MACE 将使用设备: {mace_device} ---")
+        print(f"--- 🛠️ MACE using device: {mace_device} ---")
 
         final_traj_file = relax_atoms(
             atoms_list=list(initial_conformers),
@@ -450,10 +450,10 @@ def tool_executor_node(state: AgentState) -> dict:
             mace_precision=mace_precision,
             use_dispersion=use_dispersion
         )
-        tool_logs.append(f"成功: 结构弛豫完成 (弛豫了 Top {relax_n})。轨迹保存在 '{final_traj_file}'。")
+        tool_logs.append(f"Success: Structure relaxation complete (Relaxed Top {relax_n}). Trajectory saved to '{final_traj_file}'.")
         
-        # 9. 分析结果
-        print("--- 🔬 调用分析工具... ---")
+        # 9. Analyze Results
+        print("--- 🔬 Calling Analysis Tool... ---")
         analysis_json_str = analyze_relaxation_results(
             relaxed_trajectory_file=final_traj_file,
             slab_atoms=final_slab_atoms,
@@ -462,19 +462,19 @@ def tool_executor_node(state: AgentState) -> dict:
             e_surface_ref=E_surface,
             e_adsorbate_ref=E_adsorbate
         )
-        tool_logs.append(f"成功: 分析工具已执行。")
-        print(f"--- 🔬 分析结果: {analysis_json_str} ---")
+        tool_logs.append(f"Success: Analysis tool executed.")
+        print(f"--- 🔬 Analysis Result: {analysis_json_str} ---")
         analysis_json = json.loads(analysis_json_str)
 
         if analysis_json.get("status") == "success":
             e_new = analysis_json.get("most_stable_energy_eV")
             is_dissociated = analysis_json.get("is_dissociated")
 
-            # 逻辑分支 A: 如果是完整的分子 (Molecular State)
+            # Logic Branch A: Molecular State
             if not is_dissociated:
                 e_old_mol = new_best_molecular.get("most_stable_energy_eV", float('inf')) if new_best_molecular else float('inf')
                 if isinstance(e_new, (int, float)) and e_new < e_old_mol:
-                    print(f"--- 🌟 发现新最优 [分子态]: {e_new:.4f} eV ---")
+                    print(f"--- 🌟 New Best Found [Molecular]: {e_new:.4f} eV ---")
                     new_best_molecular = {
                         "most_stable_energy_eV": e_new,
                         "analysis_json": analysis_json,
@@ -482,11 +482,11 @@ def tool_executor_node(state: AgentState) -> dict:
                         "result_type": "Perfect" if analysis_json.get("bond_change_count")==0 else "Isomerized"
                     }
 
-            # 逻辑分支 B: 如果是解离态 (Dissociated State) - [新增]
+            # Logic Branch B: Dissociated State
             else:
                 e_old_diss = new_best_dissociated.get("most_stable_energy_eV", float('inf')) if new_best_dissociated else float('inf')
                 if isinstance(e_new, (int, float)) and e_new < e_old_diss:
-                    print(f"--- ⚠️ 发现更稳定的 [解离态]: {e_new:.4f} eV (将作为热力学参考) ---")
+                    print(f"--- ⚠️ More stable [Dissociated] state found: {e_new:.4f} eV (will serve as thermodynamic reference) ---")
                     new_best_dissociated = {
                         "most_stable_energy_eV": e_new,
                         "analysis_json": analysis_json,
@@ -496,9 +496,9 @@ def tool_executor_node(state: AgentState) -> dict:
 
     except Exception as e:
         error_message = str(e)
-        print(f"--- 🛑 工具执行失败: {error_message} ---")
+        print(f"--- 🛑 Tool Execution Failed: {error_message} ---")
         tool_logs.append(f"Error during tool execution: {error_message}")
-        analysis_json = {"status": "error", "message": f"工具执行失败: {error_message}"}
+        analysis_json = {"status": "error", "message": f"Tool execution failed: {error_message}"}
         
     return {
         "messages": [ToolMessage(content="\n".join(tool_logs), tool_call_id="tool_executor")],
@@ -509,10 +509,10 @@ def tool_executor_node(state: AgentState) -> dict:
 
 def final_analyzer_node(state: AgentState) -> dict:
     """ 
-    节点 5: Final Analyzer
-    功能：基于全局最优结果生成报告，并区分完美吸附与分子内重排。
+    Node 5: Final Analyzer
+    Function: Generate report based on global best results, distinguishing between perfect adsorption and intramolecular rearrangement.
     """
-    print("--- ✍️ 调用 Final Analyzer 节点 ---")
+    print("--- ✍️ Calling Final Analyzer Node ---")
     llm = get_llm()
     
     # 1. 提取数据源
@@ -531,33 +531,33 @@ def final_analyzer_node(state: AgentState) -> dict:
     source_type = "failure"
     result_label = "Unknown" # 用于提示 LLM 结果类型
 
-    # 优先级 1: 历史最优
+    # Priority 1: History Best
     if best_result and isinstance(best_result, dict):
-        print(f"--- ✍️ Final Analyzer: 锁定全局最优方案 (E={best_result.get('most_stable_energy_eV')} eV) ---")
+        print(f"--- ✍️ Final Analyzer: Locked global best plan (E={best_result.get('most_stable_energy_eV')} eV) ---")
         target_data = best_result.get("analysis_json")
         plan_used = best_result.get("plan")
-        # 如果 route_after_analysis 保存了 result_type，则读取它
+        # If route_after_analysis saved result_type, read it
         result_label = best_result.get("result_type", "Best History")
         source_type = "success"
     
-    # 优先级 2: 最后一次尝试成功
+    # Priority 2: Last attempt success
     elif last_analysis.get("status") == "success" and last_analysis.get("is_covalently_bound"):
-        print("--- ✍️ Final Analyzer: 无历史最优，使用最后一步的成功结果 ---")
+        print("--- ✍️ Final Analyzer: No history best, using success result from last step ---")
         target_data = last_analysis
         plan_used = state.get("plan")
         result_label = "Last Attempt"
         source_type = "success"
     
     else:
-        print("--- ✍️ Final Analyzer: 所有尝试均失败 ---")
+        print("--- ✍️ Final Analyzer: All attempts failed ---")
         source_type = "failure"
 
-    # 3. 构建 Prompt
+    # 3. Construct Prompt
     if source_type == "success":
         data_str = json.dumps(target_data, indent=2, ensure_ascii=False)
         plan_str = json.dumps(plan_used, indent=2, ensure_ascii=False)
         
-        # [新增] 准备解离态对比数据
+        # [New] Prepare dissociated state comparison data
         diss_warning_context = ""
         if best_dissociated:
             e_mol = target_data.get("most_stable_energy_eV", 999)
@@ -565,89 +565,89 @@ def final_analyzer_node(state: AgentState) -> dict:
             if e_diss < e_mol:
                 delta_E = e_diss - e_mol
                 diss_warning_context = (
-                    f"\n*** 严重热力学警告数据 ***\n"
-                    f"虽然用户要求寻找分子吸附，但系统在历史计算中发现了能量更低的解离态。\n"
-                    f"- 分子态能量: {e_mol:.3f} eV\n"
-                    f"- 解离态能量: {e_diss:.3f} eV (更稳定 {abs(delta_E):.3f} eV)\n"
-                    f"这意味着报告的分子态在热力学上是亚稳的，容易自发解离。"
+                    f"\n*** SEVERE THERMODYNAMIC WARNING ***\n"
+                    f"Although the user requested molecular adsorption, the system found a lower energy dissociated state in history.\n"
+                    f"- Molecular State Energy: {e_mol:.3f} eV\n"
+                    f"- Dissociated State Energy: {e_diss:.3f} eV (More stable by {abs(delta_E):.3f} eV)\n"
+                    f"This means the reported molecular state is thermodynamically metastable and prone to spontaneous dissociation."
                 )
 
         final_prompt = f"""
-        你是一名严谨的计算化学家。你的任务是根据提供的【客观事实数据】撰写最终实验报告。
+        You are a rigorous computational chemist. Your task is to write a final experimental report based on the provided [OBJECTIVE FACTS].
 
-        !!! 严重警告与科学标准 !!!
-        1. **精度判定**: 由于硬件限制，计算使用 float32 精度。能量差 < 0.05 eV 可能是因为 **"数值噪声"** 或 **"能量简并"**。如果发现次优位点与最优位点能量差在此范围内，必须在报告中声明它们在室温下具有竞争性，**严禁**武断地宣称其中一个是唯一的绝对最优。
-        2. **标签纠错**: 工具可能会根据几何距离错误地将高配位吸附（Hollow）标记为 "desorbed"。
-        3. **异质性判定**: 对于合金表面（如 Ru3Mo），同一种类位点（如 Bridge Ru-Ru）可能存在多种环境。如果历史记录显示两次尝试 Bridge 位点的结果不同，请在讨论中指出这是由 **"表面异质性"** 导致的。
-        4. **严禁编造**: 严格基于 JSON 数据。
+        !!! SEVERE WARNING & SCIENTIFIC STANDARDS !!!
+        1. **Precision Judgment**: Due to hardware limits, calculations use float32 precision. Energy differences < 0.05 eV may be due to **"numerical noise"** or **"energy degeneracy"**. If you find sub-optimal sites with energy differences within this range, you MUST declare in the report that they are competitive at room temperature. **DO NOT** arbitrarily claim one is the unique absolute best.
+        2. **Label Correction**: Tools might incorrectly label high-coordination adsorption (Hollow) as "desorbed" based on geometric distance.
+        3. **Heterogeneity Judgment**: For alloy surfaces (e.g., Ru3Mo), the same type of site (e.g., Bridge Ru-Ru) may exist in multiple environments. If history shows different results for two attempts at Bridge sites, point out in the discussion that this is due to **"surface heterogeneity"**.
+        4. **No Fabrication**: Strictly base on JSON data.
 
-        **用户请求:** {state['user_request']}
+        **User Request:** {state['user_request']}
 
-        **最佳吸附构型数据:**
+        **Best Adsorption Configuration Data:**
         ```json
         {data_str}
         ```
 
         {diss_warning_context}
 
-        **初始规划:**
+        **Initial Plan:**
         ```json
         {plan_str}
         ```
 
-        **撰写要求:**
-        1.  **结论:** 直接回答用户请求。如果存在能量简并 (<0.05 eV)，请务必说明存在多个竞争构型。
-        2.  **数据支撑:** 列出 `most_stable_energy_eV` (保留3位小数) 和 `final_bond_distance_A`。
-        3.  **几何细节:** 描述 `bonded_surface_atoms`，并明确提及具体的原子索引（如 Ru #41），以体现位点的唯一性。
-        4.  **位点纠正与滑移:** 描述是否发生了从 `planned_site_type` 到 `actual_site_type` 的滑移。
-        5.  **化学状态判定:** - **完美吸附**: `bond_change_count == 0`
-            - **异构化/重排**: `bond_change_count > 0` 但未解离
-            - **解离**: `is_dissociated == True`
+        **Writing Requirements:**
+        1.  **Conclusion:** Directly answer the user request. If energy degeneracy (<0.05 eV) exists, explicitly state that multiple competitive configurations exist.
+        2.  **Data Support:** List `most_stable_energy_eV` (3 decimal places) and `final_bond_distance_A`.
+        3.  **Geometric Details:** Describe `bonded_surface_atoms`, and explicitly mention specific atom indices (e.g., Ru #41) to reflect site uniqueness.
+        4.  **Site Correction & Slip:** Describe if a slip occurred from `planned_site_type` to `actual_site_type`.
+        5.  **Chemical State Judgment:** - **Perfect Adsorption**: `bond_change_count == 0`
+            - **Isomerization/Rearrangement**: `bond_change_count > 0` but not dissociated
+            - **Dissociation**: `is_dissociated == True`
         """
     else:
-        fail_reason = last_analysis.get("message", "未找到稳定构型。")
+        fail_reason = last_analysis.get("message", "No stable configuration found.")
         final_prompt = f"""
-        你是一个错误报告助手。
-        任务：礼貌地告知用户，在经过多次尝试后，未能找到符合要求的稳定吸附构型。
-        错误日志："{fail_reason}"
-        请建议用户检查 SMILES 或更换表面模型。严禁捏造结果。
+        You are an error reporting assistant.
+        Task: Politely inform the user that after multiple attempts, no stable adsorption configuration meeting the requirements was found.
+        Error Log: "{fail_reason}"
+        Please suggest the user check the SMILES or change the surface model. Do not fabricate results.
         """
 
-    # 4. 调用 LLM
+    # 4. Call LLM
     response = llm.invoke([HumanMessage(content=final_prompt)])
     
-    print("--- 🏁 最终报告生成完毕 ---")
+    print("--- 🏁 Final Report Generated ---")
     return {"messages": [AIMessage(content=response.content)]}
 
-# --- 4. 定义图的逻辑流 (Edges) ---
+# --- 4. Define Graph Logic Flow (Edges) ---
 def route_after_validation(state: AgentState) -> str:
-    print("--- 🤔 Python 决策分支 1 (验证器) ---")
+    print("--- 🤔 Python Decision Branch 1 (Validator) ---")
     if state.get("validation_error"):
-        print(f"--- 决策: 方案失败，返回规划 ---")
+        print(f"--- Decision: Plan failed, returning to Planner ---")
         return "planner"
     
-    # 路由逻辑
+    # Routing logic
     plan_json = state.get("plan", {})
     solution = plan_json.get("solution", {})
     if solution.get("action") == "terminate":
-        print(f"--- 决策: Planner 请求终止，前往最终分析报告 ---")
-        return "final_analyzer"  # 跳过 Tool Executor，直接去写报告
+        print(f"--- Decision: Planner requested termination, going to Final Analyzer ---")
+        return "final_analyzer"  # Skip Tool Executor, go directly to report
     
     else:
-        print(f"--- 决策: 方案通过，前往执行 ---")
+        print(f"--- Decision: Plan passed, going to Tool Executor ---")
         return "tool_executor"
 
 def route_after_analysis(state: AgentState) -> str:
     """
-    简化的路由器：生成富含信息的历史记录，并决定下一步方向。
+    Simplified Router: Generates rich history and decides next step.
     """
-    print("--- 🤔 Python 决策分支 3 (分析器) ---")
+    print("--- 🤔 Python Decision Branch 3 (Analyzer) ---")
 
-    # 1. 优先检查：如果上一轮 Planner 已经决定终止，且我们刚跑完 Final Analyzer，
-    #    那么现在必须彻底结束流程。
+    # 1. Priority Check: If previous Planner decided to terminate, and we just finished Final Analyzer,
+    #    then we must end the process now.
     plan_solution = state.get("plan", {}).get("solution", {})
     if plan_solution.get("action") == "terminate":
-        print("--- 决策: 检测到终止信号 (Terminate Action)，流程正常结束。 ---")
+        print("--- Decision: Termination signal detected (Terminate Action), process ending normally. ---")
         return "end"
 
     current_history = state.get("history", [])
@@ -656,12 +656,12 @@ def route_after_analysis(state: AgentState) -> str:
         analysis_data = json.loads(state.get("analysis_json", "{}"))
         status = analysis_data.get("status")
         
-        # 提取规划描述
+        # Extract plan description
         plan = state.get("plan", {}).get("solution", {})
         plan_desc = f"{plan.get('site_type')} @ {plan.get('surface_binding_atoms')} (Index {plan.get('adsorbate_binding_indices')})"
         
         if status == "fatal_error":
-            state["history"].append(f"【致命错误】 方案: {plan_desc} -> {analysis_data.get('message')}")
+            state["history"].append(f"【FATAL ERROR】 Plan: {plan_desc} -> {analysis_data.get('message')}")
             return "end"
 
         # 1. 提取关键指标
@@ -679,20 +679,20 @@ def route_after_analysis(state: AgentState) -> str:
         planned_syms = site_info.get("planned_symbols", [])
         actual_syms = site_info.get("actual_symbols", [])
 
-        # --- 定义基础 site_msg ---
-        site_msg = f"位点: {actual_site} ({','.join(actual_syms)})"
+        # --- Define base site_msg ---
+        site_msg = f"Site: {actual_site} ({','.join(actual_syms)})"
 
-        # 强化滑移的负反馈
+        # Reinforce negative feedback for slips
         if is_chem_slip:
             planned_str = "-".join(planned_syms)
             actual_str = "-".join(actual_syms)
             site_msg = (
-                f"⚠️【不稳定位点警告】⚠️: "
-                f"规划的 {planned_site} ({planned_str}) 不稳定，吸附物自发滑移到了 {actual_site} ({actual_str})。"
-                f"这意味着 {planned_str} 对该吸附物亲和力不足，后续请**禁止**再次测试 {planned_str} 类位点！"
+                f"⚠️【Unstable Site Warning】⚠️: "
+                f"Planned {planned_site} ({planned_str}) is unstable, adsorbate spontaneously slipped to {actual_site} ({actual_str})."
+                f"This means {planned_str} has insufficient affinity for this adsorbate. Please **FORBID** testing {planned_str} type sites again!"
             )
         elif actual_site != "unknown" and planned_site != "unknown" and actual_site != planned_site:
-            site_msg = f"⚠️ 几何滑移: {planned_site} -> {actual_site}"
+            site_msg = f"⚠️ Geometric Slip: {planned_site} -> {actual_site}"
 
         # --- 3. [修复逻辑] 智能区分“新最优”与“重复收敛” ---
         tag = ""
@@ -701,52 +701,52 @@ def route_after_analysis(state: AgentState) -> str:
         if best_res and isinstance(energy, (int, float)):
             best_e = best_res.get("most_stable_energy_eV", float('inf'))
             
-            # 核心修复：检查当前运行是否就是创造 Best Result 的那个运行
-            # 我们通过比较 plan 对象来判断。best_result 中存储了产生它的 plan。
+            # Core Fix: Check if current run is the one that created Best Result
+            # We compare plan objects. best_result stores the plan that produced it.
             current_plan_obj = state.get("plan")
             best_plan_obj = best_res.get("plan")
             
-            # 如果当前 Plan 就是 Best Plan，说明这是“新纪录”，不是“重复”
+            # If current Plan is Best Plan, it's a "New Record", not "Duplicate"
             is_new_record = (current_plan_obj == best_plan_obj)
             
             if is_new_record:
-                tag = " [🌟 新最优]"
-            elif abs(energy - best_e) < 0.05: # 0.05 eV 误差范围内
-                # 既然不是新纪录，且能量又一样，那就是重复路径
-                tag = " [🔄 已收敛到已知最优态]"
+                tag = " [🌟 New Best]"
+            elif abs(energy - best_e) < 0.05: # Within 0.05 eV error
+                # Not new record, and energy is same -> Duplicate path
+                tag = " [🔄 Converged to known best]"
         
         # 追加标签
         site_msg = f"{site_msg}{tag}"
 
-        # 4. 构建历史条目
+        # 4. Build History Entry
         if status == "success":
             if is_dissociated:
-                res_str = "❌ 分子解离"
+                res_str = "❌ Dissociated"
             elif bond_change > 0:
-                res_str = f"⚠️ 分子内重排(BC={bond_change})"
+                res_str = f"⚠️ Rearrangement(BC={bond_change})"
             else:
-                res_str = "✅ 完美吸附"
+                res_str = "✅ Perfect Adsorption"
                 
-            # 格式：[结果] 方案 -> 实际位点 | 能量
+            # Format: [Result] Plan -> Actual Site | Energy
             history_entry = (
                 f"【{res_str}】 {plan_desc} "
                 f"-> {site_msg} | "
                 f"E={energy:.3f} eV"
             )
         else:
-            history_entry = f"【计算失败】 {plan_desc} -> 原因: {analysis_data.get('message')}"
+            history_entry = f"【Calculation Failed】 {plan_desc} -> Reason: {analysis_data.get('message')}"
             
         current_history.append(history_entry)
 
     except Exception as e:
-        current_history.append(f"历史记录生成异常: {e}")
+        current_history.append(f"History generation exception: {e}")
 
     # 更新历史记录
     state["history"] = current_history
 
     # 5. 决策逻辑
     if len(current_history) >= MAX_RETRIES:
-        print(f"--- 决策: 已达到 {len(current_history)} 次尝试上限。流程结束。 ---")
+        print(f"--- Decision: Reached {len(current_history)} attempts limit. Process ending. ---")
         return "end"
     
     return "planner"
@@ -808,7 +808,7 @@ def main_cli():
     initial_state = _prepare_initial_state(args.smiles, args.slab_path, args.user_request)
     
     agent_executor = get_agent_executor()
-    print("\n--- 🚀 Adsorb-Agent 已启动 ---\n")
+    print("\n--- 🚀 Adsorb-Agent Started ---\n")
     final_state = None
 
     config = {"recursion_limit": 30}
@@ -822,15 +822,15 @@ def main_cli():
                 print(f"[{last_message.type}]")
                 print(last_message.content)
                 print("---\n")
-    print("\n--- 🏁 Adsorb-Agent 任务完成 ---\n")
-    print("最终分析报告:")
+    print("\n--- 🏁 Adsorb-Agent Task Completed ---\n")
+    print("Final Analysis Report:")
     if final_state and "messages" in final_state:
         for msg in reversed(final_state["messages"]):
             if isinstance(msg, AIMessage):
                 print(msg.content)
                 break
         else:
-             print("未找到最终 AI 消息。")
+             print("No final AI message found.")
 
 if __name__ == '__main__':
     exec_globals = builtins.__dict__.copy()
