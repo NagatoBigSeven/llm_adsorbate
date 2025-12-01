@@ -23,6 +23,7 @@ import torch
 from mace.calculators import mace_mp
 from dotenv import load_dotenv
 
+from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage, ToolMessage
 from langgraph.graph import StateGraph, END
@@ -66,28 +67,28 @@ class AgentState(TypedDict):
 # --- 2. Setup Environment and LLM ---
 load_dotenv()
 
-if not os.environ.get("GOOGLE_API_KEY"):
-    raise ValueError("GOOGLE_API_KEY environment variable not set.")
-# if not os.environ.get("OPENROUTER_API_KEY"):
-#     raise ValueError("OPENROUTER_API_KEY environment variable not set.")
+# if not os.environ.get("GOOGLE_API_KEY"):
+#     raise ValueError("GOOGLE_API_KEY environment variable not set.")
+if not os.environ.get("OPENROUTER_API_KEY"):
+    raise ValueError("OPENROUTER_API_KEY environment variable not set.")
 
 def get_llm():
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-pro", 
-        temperature=0.0, 
-        max_tokens=4096, 
-        timeout=120, 
-    )
-    # llm = ChatOpenAI(
-    #     openai_api_base="https://openrouter.ai/api/v1",
-    #     openai_api_key=os.getenv("OPENROUTER_API_KEY"),
-    #     model="google/gemini-2.5-pro",
-    #     streaming=False, 
-    #     temperature=0.0,
+    # llm = ChatGoogleGenerativeAI(
+    #     model="gemini-2.5-pro", 
+    #     temperature=0.0, 
     #     max_tokens=4096, 
     #     timeout=120, 
-    #     seed=42
     # )
+    llm = ChatOpenAI(
+        openai_api_base="https://openrouter.ai/api/v1",
+        openai_api_key=os.getenv("OPENROUTER_API_KEY"),
+        model="google/gemini-2.5-pro",
+        streaming=False, 
+        temperature=0.0,
+        max_tokens=4096, 
+        timeout=120, 
+        seed=42
+    )
     return llm
 
 def make_plan_key(plan_json: Optional[dict]) -> Optional[str]:
@@ -815,7 +816,7 @@ def main_cli():
     print("\n--- 🚀 Adsorb-Agent Started ---\n")
     final_state = None
 
-    config = {"recursion_limit": 30}
+    config = {"recursion_limit": 50}
 
     for chunk in agent_executor.stream(initial_state, config=config, stream_mode="values"):
         final_state = chunk
@@ -840,7 +841,7 @@ if __name__ == '__main__':
     exec_globals = builtins.__dict__.copy()
     exec_globals.update({
         "np": np, "pd": pd, "scipy": scipy, "sklearn": sklearn, "math": math,
-        "ase": ase, "autoadsorbate": autoadsorbate, "torch": torch, "mace": mace,
+        "ase": ase, "autoadsorbate": autoadsorbate, "torch": torch
     })
     
     main_cli()
