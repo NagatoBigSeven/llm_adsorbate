@@ -201,19 +201,20 @@ print("--- ✅ 修复已应用。Surf 模块及 Surface 类引用的函数已被
 
 from collections import Counter
 import ase
-from ase.io import read, write
-from autoadsorbate import Surface, Fragment
-from ase.constraints import FixAtoms
-from ase.optimize import BFGS
-from ase.io.trajectory import Trajectory
-from mace.calculators import mace_mp
-from ase.md.langevin import Langevin
 from ase import units
-import os
+from ase.constraints import FixAtoms
+from ase.io import read, write
+from ase.io.trajectory import Trajectory
+from ase.md.langevin import Langevin
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from ase.neighborlist import build_neighbor_list, natural_cutoffs
-from scipy.sparse.csgraph import connected_components
+from ase.optimize import BFGS
+from autoadsorbate import Surface, Fragment
+from mace.calculators import mace_mp
+import os
+import platform
 import json
+from scipy.sparse.csgraph import connected_components
 from rdkit import Chem
 from rdkit.Chem import AllChem
 from typing import Union, Tuple
@@ -266,7 +267,6 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
         target_atom_original = mol.GetAtomWithIdx(target_idx)
         original_h_count = target_atom_original.GetTotalNumHs()
         num_radicals = target_atom_original.GetNumRadicalElectrons()
-        # original_charge = target_atom_original.GetFormalCharge() # 不需要了，我们尽量保持电荷不变
 
         new_mol = Chem.RWMol(mol)
 
@@ -568,6 +568,7 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
 
                     print(f"--- 🛠️ _get_fragment: 已手动对齐 S-S 标记用于 End-on 模式 (倾斜修正)。 ---")
                     all_rdkit_atoms[t1_idx].SetAtomMapNum(0)
+
                 elif num_binding_indices == 2:
                     # --- side-on @ bridge/hollow ---
                     if 114514 not in map_num_to_idx or 1919810 not in map_num_to_idx:
@@ -575,7 +576,9 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
 
                     binding_indices = [map_num_to_idx[114514], map_num_to_idx[1919810]]
 
-                    # 手动对齐 S-S 向量，使其垂直于成键原子之间的键
+                    # 改用 Parallel-Bridge 策略
+                    # 使 S-S 向量 (Dummy Atoms) 平行于成键原子之间的键向量
+                    # 这样当 Autoadsorbate 将 S-S 对齐到表面 Bridge 轴时，分子键也会平行于 Bridge 轴。
                     s1_idx, s2_idx = proxy_indices[0], proxy_indices[1]
                     t1_idx, t2_idx = binding_indices[0], binding_indices[1]
 
@@ -587,23 +590,19 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
                     midpoint = (p1 + p2) / 2.0
                     v_bond = p1 - p2
                         
-                    # 3. 计算一个垂直于键向量的向量 (即我们的 S-S 向量)
-                    v_temp = np.array([1.0, 0.0, 0.0]) # 任意的非平行向量
-                    v_perp = np.cross(v_bond, v_temp)
-
-                    # 处理 v_bond 与 v_temp 共线的情况
-                    if np.linalg.norm(v_perp) < 1e-3:
-                        v_temp = np.array([0.0, 1.0, 0.0])
-                        v_perp = np.cross(v_bond, v_temp)
+                    # 3. 归一化键向量
+                    norm = np.linalg.norm(v_bond)
+                    if norm < 1e-3: 
+                        v_bond_norm = np.array([1.0, 0.0, 0.0])
+                    else:
+                        v_bond_norm = v_bond / norm
                         
-                    v_perp_norm = v_perp / np.linalg.norm(v_perp)
+                    # 4. 将 S1 和 S2 放置在中点两侧，沿键向量方向延伸
+                    # 距离 0.5 是任意的，只要定义了方向即可。
+                    positions[s1_idx] = midpoint + v_bond_norm * 0.5
+                    positions[s2_idx] = midpoint - v_bond_norm * 0.5
                         
-                    # 4. 手动移动 RDKit 坐标数组中的 S 原子
-                    # (距离 0.5 是任意的，autoadsorbate 只关心方向)
-                    positions[s1_idx] = midpoint + v_perp_norm * 0.5
-                    positions[s2_idx] = midpoint - v_perp_norm * 0.5
-                        
-                    print(f"--- 🛠️ _get_fragment: 已手动对齐 S-S 向量，使其垂直于 {t1_idx}-{t2_idx} 键。 ---")
+                    print(f"--- 🛠️ _get_fragment: 已对齐 S-S 向量平行于键轴 (Parallel Alignment) 以避免 Cross-Bridge 问题。 ---")
                         
                     # 5. 清理临时映射号
                     all_rdkit_atoms[t1_idx].SetAtomMapNum(0)
@@ -893,19 +892,21 @@ def populate_surface_with_fragment(
     return traj_file
 
 def relax_atoms(
-    atoms_list: list, 
-    slab_indices: list, 
+    atoms_list: list,
+    slab_indices: list,
     relax_top_n: int = 1,
-    fmax: float = 0.05, 
+    fmax: float = 0.05,
     steps: int = 500,
     md_steps: int = 20,
     md_temp: float = 150.0,
     mace_model: str = "small",
-    mace_device: str = "cpu"
+    mace_device: str = "cpu",
+    mace_precision: str = "float32",
+    use_dispersion: bool = False
 ) -> str:
     print(f"--- 🛠️ 正在初始化 MACE 计算器 (Model: {mace_model}, Device: {mace_device})... ---")
     try:
-        calculator = mace_mp(model=mace_model, device=mace_device, default_dtype='float32', dispersion=True)
+        calculator = mace_mp(model=mace_model, device=mace_device, default_dtype=mace_precision, dispersion=use_dispersion)
     except Exception as e:
         print(f"--- 🛑 MACE 初始化失败: {e} ---")
         raise
@@ -951,7 +952,7 @@ def relax_atoms(
         atoms.set_constraint(constraint)
         
         max_force = np.max(np.linalg.norm(atoms.get_forces(), axis=1))
-        if max_force > 500.0:
+        if max_force > 200.0:
             print(f"--- ⚠️ 跳过结构 {i+1}: 初始力过大 (Max Force = {max_force:.2f} eV/A)... ---")
             continue
 
@@ -961,6 +962,12 @@ def relax_atoms(
             dyn_md.run(md_steps)
 
         energy = atoms.get_potential_energy()
+
+        # --- 能量 sanity check，屏蔽非物理爆炸结构 ---
+        if (not np.isfinite(energy)) or energy < -2000.0:
+            print(f"--- ⚠️ 跳过结构 {i+1}: 能量异常 (E = {energy:.2f} eV)，疑似数值崩溃 ---")
+            continue
+
         print(f"--- 评估结构 {i+1}/{len(atoms_list)}... 能量 (预热后): {energy:.4f} eV ---")
         evaluated_configs.append((energy, i, atoms.copy())) # 存储副本
 
@@ -1080,14 +1087,14 @@ def analyze_relaxation_results(
         
         # 1. 定义智能判定函数 (移动到最前方，供全局复用)
         # 针对 Float32 精度和金属吸附特性，将基础容忍度从 1.25 提升至 1.3
-        def check_bonding_smart(atom_idx_1, atom_idx_2, r1, r2, current_energy_eV):
+        def check_bonding_smart(atom_idx_1, atom_idx_2, r1, r2, current_energy_eV, check_atoms_obj):
             base_mult = 1.30 # 基础键长容忍度
             
             # 能量辅助判定: 如果能量极低 (< -0.5 eV)，说明必然有强相互作用，放宽几何判定
             if current_energy_eV < -0.5:
                 base_mult = 1.45 # 即使几何略微拉伸，只要能量很低，就算成键
             
-            d = relaxed_atoms.get_distance(atom_idx_1, atom_idx_2, mic=True)
+            d = check_atoms_obj.get_distance(atom_idx_1, atom_idx_2, mic=True)
             threshold = (r1 + r2) * base_mult
             return d <= threshold, d, threshold
 
@@ -1101,9 +1108,9 @@ def analyze_relaxation_results(
         check_atoms.set_pbc(relaxed_atoms.get_pbc())
 
         # 3. 构建邻接矩阵 (考虑 PBC)
-        # mult=1.25 给键长一点裕度 (C-H ~1.1A -> cutoff ~1.3A)
-        # 如果距离超过这个范围，那就是真的断了
-        check_cutoffs = natural_cutoffs(check_atoms, mult=1.25)
+        # mult=1.35 增加对键长拉伸的容忍度
+        # 避免因为强吸附导致的键活化被误判为断键
+        check_cutoffs = natural_cutoffs(check_atoms, mult=1.35)
         nl = build_neighbor_list(check_atoms, cutoffs=check_cutoffs, self_interaction=False)
         adjacency_matrix = nl.get_connectivity_matrix()
 
@@ -1168,7 +1175,7 @@ def analyze_relaxation_results(
             r_ads = cov_cutoffs_check[anchor_idx]
             for slab_idx in slab_indices_check:
                 r_slab = cov_cutoffs_check[slab_idx]
-                is_connected, _, _ = check_bonding_smart(anchor_idx, slab_idx, r_ads, r_slab, E_ads)
+                is_connected, _, _ = check_bonding_smart(anchor_idx, slab_idx, r_ads, r_slab, E_ads, relaxed_atoms)
                 if is_connected:
                     actual_bonded_slab_indices.add(slab_idx)
         
@@ -1271,7 +1278,7 @@ def analyze_relaxation_results(
                 
                 # 使用智能判定
                 is_connected, d, threshold = check_bonding_smart(
-                    target_atom_global_index, s_idx, r_ads, r_slab, E_ads
+                    target_atom_global_index, s_idx, r_ads, r_slab, E_ads, relaxed_atoms
                 )
                 
                 if d < min_distance:
@@ -1373,7 +1380,7 @@ def analyze_relaxation_results(
             target_atom_pos = relaxed_atoms[target_atom_global_index].position
             print(f"--- 分析: (2-index 模式) 正在检查第一个吸附物原子, 符号: '{target_atom_symbol}', 全局索引: {target_atom_global_index}。---")
 
-            distances = np.linalg.norm(slab_atoms_relaxed.positions - target_atom_pos, axis=1)
+            distances = np.linalg.norm(slab_atoms.positions - target_atom_pos, axis=1)
             min_distance = np.min(distances)
             nearest_slab_atom_global_index = slab_indices[np.argmin(distances)]
             nearest_slab_atom_symbol = relaxed_atoms[nearest_slab_atom_global_index].symbol
@@ -1388,7 +1395,7 @@ def analyze_relaxation_results(
             second_atom_pos = relaxed_atoms[second_atom_global_index].position
             print(f"--- 分析: (side-on 模式) 正在检查第二个吸附物原子, 符号: '{second_atom_symbol}', 全局索引: {second_atom_global_index}。---")
             
-            distances_2 = np.linalg.norm(slab_atoms_relaxed.positions - second_atom_pos, axis=1)
+            distances_2 = np.linalg.norm(slab_atoms.positions - second_atom_pos, axis=1)
             min_distance_2 = np.min(distances_2)
             nearest_slab_atom_global_index_2 = slab_indices[np.argmin(distances_2)]
             nearest_slab_atom_symbol_2 = relaxed_atoms[nearest_slab_atom_global_index_2].symbol
@@ -1411,7 +1418,7 @@ def analyze_relaxation_results(
                 for s_idx in slab_indices:
                     r_slab = cov_cutoffs_check[s_idx]
                     is_connected, d, _ = check_bonding_smart(
-                        ads_idx, s_idx, r_ads, r_slab, E_ads
+                        ads_idx, s_idx, r_ads, r_slab, E_ads, relaxed_atoms
                     )
                     # 判定成键
                     if is_connected:

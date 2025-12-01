@@ -1,6 +1,7 @@
 import os
 import builtins
 import math
+import platform
 import argparse
 import json
 from collections import Counter
@@ -11,13 +12,17 @@ import scipy
 import sklearn
 from rdkit import Chem
 import ase
-from  ase.io import read
+from ase import units
+from ase.constraints import FixAtoms
+from ase.io import read
+from ase.md.langevin import Langevin
+from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
+from ase.optimize import BFGS
 import autoadsorbate
 import torch
-import mace
+from mace.calculators import mace_mp
 from dotenv import load_dotenv
 
-from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage, ToolMessage
 from langgraph.graph import StateGraph, END
@@ -319,23 +324,35 @@ def tool_executor_node(state: AgentState) -> dict:
         
         # 3. 初始化计算器
         try:
-            import torch
-            from ase import units
-            from ase.constraints import FixAtoms
-            from ase.md.langevin import Langevin
-            from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
-            from ase.optimize import BFGS
-            from mace.calculators import mace_mp
-            
             # 统一定义弛豫参数
-            opt_fmax = 0.05
-            opt_steps = 500
-            md_steps = 20
-            md_temp = 150.0
-            mace_model = "small"
-            mace_device = "cuda" if torch.cuda.is_available() else "cpu"
-            
-            temp_calc = mace_mp(model=mace_model, device=mace_device, default_dtype='float32', dispersion=True)
+            has_cuda = torch.cuda.is_available()
+
+            if not has_cuda:
+                opt_fmax = 0.10
+                opt_steps = 200
+                md_steps = 0
+                md_temp = 150.0
+                mace_model = "small"
+                mace_device = "cpu"
+                mace_precision = "float32" if platform.system() == "Darwin" else "float64"
+                use_dispersion = False
+            else:
+                opt_fmax = 0.05
+                opt_steps = 500
+                md_steps = 20
+                md_temp = 150.0
+                mace_model = "large"
+                mace_device = "cuda"
+                mace_precision = "float64"
+                use_dispersion = True
+
+            # 这里的 temp_calc 主要用于 E_adsorbate 和 E_surface
+            temp_calc = mace_mp(
+                model=mace_model,
+                device=mace_device,
+                default_dtype=mace_precision,
+                dispersion=use_dispersion,
+            )
 
         except Exception as e_calc:
             raise ValueError(f"Failed to initialize MACE calculator: {e_calc}")
@@ -418,8 +435,7 @@ def tool_executor_node(state: AgentState) -> dict:
         print("--- ⏳ 开始结构弛豫... ---")
         slab_indices = list(range(len(final_slab_atoms)))
         relax_n = plan_solution.get("relax_top_n", 1)
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"--- 🛠️ MACE 将使用设备: {device} ---")
+        print(f"--- 🛠️ MACE 将使用设备: {mace_device} ---")
 
         final_traj_file = relax_atoms(
             atoms_list=list(initial_conformers),
@@ -430,7 +446,9 @@ def tool_executor_node(state: AgentState) -> dict:
             md_steps=md_steps,
             md_temp=md_temp,
             mace_model=mace_model,
-            mace_device=mace_device
+            mace_device=mace_device,
+            mace_precision=mace_precision,
+            use_dispersion=use_dispersion
         )
         tool_logs.append(f"成功: 结构弛豫完成 (弛豫了 Top {relax_n})。轨迹保存在 '{final_traj_file}'。")
         
