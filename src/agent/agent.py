@@ -713,12 +713,21 @@ def route_after_analysis(state: AgentState) -> str:
             
             # If current Plan is Best Plan, it's a "New Record", not "Duplicate"
             is_new_record = (current_plan_obj == best_plan_obj)
+
+            # Extract geometric fingerprints for rigorous comparison
+            current_fp = site_info.get("site_fingerprint", "")
+            best_fp_data = best_res.get("analysis_json", {}).get("site_analysis", {})
+            # Handle case where analysis_json might be a dict or needs parsing (best_result stores parsed dict in your logic)
+            best_fp = best_fp_data.get("site_fingerprint", "")
             
             if is_new_record:
                 tag = " [🌟 New Best]"
-            elif abs(energy - best_e) < 0.05: # Within 0.05 eV error
-                # Not new record, and energy is same -> Duplicate path
-                tag = " [🔄 Converged to known best]"
+            elif abs(energy - best_e) < 0.05:
+                # Rigorous check: Energy is same, but is it the same site?
+                if current_fp and best_fp and current_fp == best_fp:
+                    tag = " [🔄 Converged to known best]"
+                else:
+                    tag = " [⚠️ Energy Degenerate but Geometrically Distinct]"
         
         # Append Tag
         site_msg = f"{site_msg}{tag}"

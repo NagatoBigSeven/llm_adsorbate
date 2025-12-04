@@ -26,8 +26,10 @@ Your task is to systematically find the **lowest energy** (i.e., most stable) ad
    - **Note:** If a plan **detected a reactivity change (e.g., adsorbate dissociation or rearrangement)** or **bond change count > 0**, it is considered a **failure**. This means the configuration is unstable and **dissociated** during relaxation.
    - **Special Note [Unstable Site Warning]:** If the history shows **"Chemical Slip"** occurred (e.g., slipped from Cu-Pd-Pd to Pd-Pd-Pd), this proves the initially planned site (Cu-Pd-Pd) is thermodynamically unstable.
    - **Learning Conclusion:** You must consider the initial site type that slipped as "invalid/unstable".
-   - **Critical Termination Signal:** If any entry in history contains the text **"[🔄 Converged to known optimal state]"**, it means the newly attempted site slipped back to a previously found optimal configuration. This implies the local stable configurations on the potential energy surface have been thoroughly explored. **At this point, you must immediately output `"action": "terminate"`, and must not propose new plans.**
-   - **Precision Note:** The current calculation runs in single precision mode (float32). **Energy differences < 0.05 eV must be considered as identical states (numerical noise)**. For example: If Attempt 1 got -2.847 eV and Attempt 2 got -2.859 eV, and their site descriptions are similar (or were mislabeled as desorbed), you must conclude they **have converged to the same configuration**.
+   - **Critical Termination Signal:** You must strictly observe the **Tags** in the history:
+     - **[🔄 Converged to known best]**: This means the new plan converged to the EXACT SAME geometry and energy as a previous best result. **You must immediately output `"action": "terminate"`**.
+     - **[⚠️ Energy Degenerate but Geometrically Distinct]**: This means you found a DIFFERENT site (different geometry) that happens to have the same energy. This is a VALID new discovery (degeneracy). **Do NOT terminate**. You should continue to explore other possibilities.
+   - **Precision Note:** The current calculation runs in single precision mode (float32). **Energy differences < 0.05 eV are considered similar due to numerical noise**. However, you must rely on the **Tags** mentioned above to decide if it is a duplicate state or a degenerate state.
    - **Do not invent new plans just to "try something different"**. If major high-symmetry sites (Ontop, Bridge, Hollow) have all been tested and results are close in energy (or all slipped to the same place), please directly output `terminate`.
    - **Surface Heterogeneity Analysis:** - If you find the same site type (e.g., "Bridge") gave significantly different energies in different attempts (e.g., -2.4 eV and -3.5 eV), check the `site_fingerprint`.
      - For alloy surfaces (e.g., Cu-Ga, Au-Hf), you **must** assume the same geometric site (e.g., Cu-Cu Bridge) exists in multiple chemical environments (near Ga vs. far from Ga).
@@ -41,7 +43,7 @@ Your task is to systematically find the **lowest energy** (i.e., most stable) ad
      - "hollow"
    - If {history} is "None", propose the best initial plan (e.g., for CO, usually O-ontop).
    - If {history} *already contains plans* (whether successful or not), you **must** propose a completely new plan different from *all* plans in {history} (e.g., if 'O-ontop' succeeded with -1.5 eV, you must now test 'O-bridge' or 'O-hollow' to find a lower energy configuration).
-   - **Convergence Principle:** If you find that multiple different initial sites eventually converged to the **same or extremely similar** adsorption energy (error < 0.05 eV) and configuration after relaxation, this means the global optimum has likely been found. At this point, **do not** invent unreasonable plans (such as wrong adsorbate types) just to be "different". Please directly output the terminate instruction.
+   - **Convergence Principle:** If you find that multiple different initial sites eventually converged to the **same** configuration (marked as [🔄 Converged to known best]), the global optimum has likely been found. At this point, **do not** invent unreasonable plans (such as wrong adsorbate types) just to be "different". Please directly output the terminate instruction.
    - **Note:** The entire process will automatically stop after {MAX_RETRIES} attempts. You must systematically explore all possible best plans within {MAX_RETRIES} attempts.
 3. **Analyze Request:** What is the user's core intent? (e.g., *specific atom* adsorbed with *specific orientation* at *specific site*)
 4. **Analyze Adsorbate (SMILES: {smiles}):**
@@ -140,5 +142,5 @@ The length of `adsorbate_binding_indices` **determines** the orientation (1 = en
     }}
 **--- End of Example 2 ---**
 """,
-    input_variables=["smiles", "slab_xyz_path", "surface_composition", "available_sites_description", "user_request", "history", "MAX_RETRIES"]
+    input_variables=["smiles", "slab_xyz_path", "surface_composition", "available_sites_description", "user_request", "history", "MAX_RETRIES", "autoadsorbate_context"]
 )

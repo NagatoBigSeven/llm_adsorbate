@@ -948,6 +948,10 @@ def populate_surface_with_fragment(
     print(f"--- 🛠️ Configurations saved to {traj_file} ---")
     return traj_file
 
+# Global cache for MACE calculator to avoid reloading model on every call
+_CACHED_MACE_CALC = None
+_CACHED_MACE_KEY = None
+
 def relax_atoms(
     atoms_list: list,
     slab_indices: list,
@@ -961,9 +965,18 @@ def relax_atoms(
     mace_precision: str = "float32",
     use_dispersion: bool = False
 ) -> str:
-    print(f"--- 🛠️ Initializing MACE Calculator (Model: {mace_model}, Device: {mace_device})... ---")
+    global _CACHED_MACE_CALC, _CACHED_MACE_KEY
+
+    # Create a config key to check if we can reuse the cached calculator
+    current_config_key = (mace_model, mace_device, mace_precision, use_dispersion)
+
     try:
-        calculator = mace_mp(model=mace_model, device=mace_device, default_dtype=mace_precision, dispersion=use_dispersion)
+        if _CACHED_MACE_CALC is None or _CACHED_MACE_KEY != current_config_key:
+            print(f"--- 🛠️ Initializing MACE Calculator (Model: {mace_model}, Device: {mace_device})... ---")
+            _CACHED_MACE_CALC = mace_mp(model=mace_model, device=mace_device, default_dtype=mace_precision, dispersion=use_dispersion)
+            _CACHED_MACE_KEY = current_config_key
+        
+        calculator = _CACHED_MACE_CALC
     except Exception as e:
         logger.error("MACE Initialization Failed: {e}")
         raise
