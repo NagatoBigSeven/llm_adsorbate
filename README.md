@@ -4,21 +4,19 @@
 
 <br>
 
-
 [![Cookiecutter template from @SchwallerGroup](https://img.shields.io/badge/Cookiecutter-schwallergroup-blue)](https://github.com/schwallergroup/liac-repo)
 [![Learn more @SchwallerGroup](https://img.shields.io/badge/Learn%20%0Amore-schwallergroup-blue)](https://schwallergroup.github.io)
-
 
 <h1 align="left">
   AdsKRK: An agentic atomistic simulation framework for surface science.
 </h1>
 
-
 <br>
 
-Welcome to the AdsKRK repository! This project is a prototype developed during the 2-day [LLM Hackathon for Application in Chemistry and Materials Science](https://llmhackathon.github.io/). 
+Welcome to the AdsKRK repository! This project is a prototype developed during the 2-day [LLM Hackathon for Application in Chemistry and Materials Science](https://llmhackathon.github.io/).
 
 The goal of AdsKRK is to showcase how Large Language Models (LLMs) can autonomously explore the binding configurations of adsorbates on hetero-catalytic surfaces. Starting from only a SMILES string and a surface structure (XYZ format), the agent can:
+
 * generate binding configurations,
 * run structure relaxations,
 * analyze the results, and
@@ -34,7 +32,7 @@ One particularly interesting finding during the hackathon was the agent’s abil
 The stability of the initial adsorption configuration was assessed by performing a structural relaxation. Based on the output from the simulation, the fragment did not remain bound to the surface.
 ...
 Therefore, to answer the user's question: no, the fragment does not stay covalently bound. The initial configuration, with the carbon atom placed on a top site of the Cu(211) surface, is unstable and leads to the desorption of the ligand.
-``` 
+```
 
 Which is quite impressive and might pique interest for future research about LLM reasoning for MD trajectory!
 
@@ -42,19 +40,38 @@ Which is quite impressive and might pique interest for future research about LLM
 
 Currently, to use this application, you need to have an OpenRouter account and an API key.
 
-- [OpenRouter](https://openrouter.ai/)
+* [OpenRouter](https://openrouter.ai/)
 
-You will be asked to enter your API key when you run the application.
+### API Key Configuration
+
+The application supports multiple ways to provide your API key (in priority order):
+
+1. **Environment variable**: Set `OPENROUTER_API_KEY` in your shell
+
+   ```bash
+   export OPENROUTER_API_KEY="your-api-key"
+   ```
+
+2. **Config file**: Save your key via the app's "Save API Key" checkbox.
+   * Stored at: `~/.adskrk/config.json`
+   * The app will auto-load it on startup
+
+3. **Manual input**: Enter your key in the sidebar each session
+
+> **Note**: If an environment variable is set, it takes priority over the saved config file.
 
 ## 👩‍💻 Installation
+
 ```bash
-$ git clone https://github.com/schwallergroup/llm_adsorbate.git
-$ cd llm_adsorbate
-$ uv pip install -e .
+git clone https://github.com/schwallergroup/llm_adsorbate.git
+cd llm_adsorbate
+uv pip install -e .
 ```
 
 ## 🔥 Usage
+
 This project is used via its Streamlit interface.
+
 ```shell
 streamlit run src/app/app.py
 ```

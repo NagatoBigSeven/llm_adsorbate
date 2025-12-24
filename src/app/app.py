@@ -10,6 +10,7 @@ if project_root not in sys.path:
 
 import streamlit as st
 from src.agent.agent import get_agent_executor, _prepare_initial_state
+from src.utils.config import get_api_key, save_api_key, is_env_key_set
 
 st.set_page_config(page_title="LLM Agent Demo", layout="wide")
 st.title("adsKRK")
@@ -40,10 +41,48 @@ def render_message_in_status(content, status):
             else:
                 status.markdown(part)
 
+# --- API Key Configuration ---
 st.sidebar.header("Settings")
-openrouter_api_key = st.sidebar.text_input("OpenRouter API Key", type="password", key="openrouter_api_key")
+
+# Load API key from available sources
+saved_key, key_source = get_api_key()
+env_key_active = is_env_key_set()
+
+# Show source indicator
+if key_source == "env":
+    st.sidebar.success("🌍 API Key loaded from environment variable")
+elif key_source == "config":
+    st.sidebar.info("📁 API Key loaded from config file")
+else:
+    st.sidebar.caption("✏️ Enter your OpenRouter API Key")
+
+# Show warning if env var is set
+if env_key_active:
+    st.sidebar.warning("⚠️ Environment variable is active. Saving to config will NOT override it.")
+
+# API key input field
+openrouter_api_key = st.sidebar.text_input(
+    "OpenRouter API Key", 
+    value=saved_key or "",
+    type="password", 
+    key="openrouter_api_key"
+)
+
+# Save checkbox (disabled if env var is active)
+save_key_checkbox = st.sidebar.checkbox(
+    "Save API Key for future sessions",
+    disabled=env_key_active,
+    help="Saves to ~/.adskrk/config.json" if not env_key_active else "Cannot save while environment variable is active"
+)
+
+# Set environment variable for current session
 if openrouter_api_key:
     os.environ["OPENROUTER_API_KEY"] = openrouter_api_key
+    # Save if checkbox is checked and key is different from saved
+    if save_key_checkbox and openrouter_api_key != saved_key:
+        if save_api_key(openrouter_api_key):
+            st.sidebar.success("✅ API Key saved!")
+
 
 st.sidebar.header("Inputs")
 smiles_input = st.sidebar.text_input("SMILES String")

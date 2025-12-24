@@ -30,6 +30,7 @@ from langgraph.graph import StateGraph, END
 from langchain_core.output_parsers import JsonOutputParser
 
 from src.utils.logger import get_logger
+from src.utils.config import get_api_key
 from src.tools.tools import (
     read_atoms_object,
     get_atom_index_menu,
@@ -67,12 +68,22 @@ class AgentState(TypedDict):
 # --- 2. Setup Environment and LLM ---
 load_dotenv()
 
-# if not os.environ.get("GOOGLE_API_KEY"):
-#     raise ValueError("GOOGLE_API_KEY environment variable not set.")
-if not os.environ.get("OPENROUTER_API_KEY"):
-    raise ValueError("OPENROUTER_API_KEY environment variable not set.")
+# Load API key from config (env var takes priority, then config file)
+api_key, api_key_source = get_api_key()
+if api_key:
+    # Set environment variable so it's available throughout the session
+    os.environ["OPENROUTER_API_KEY"] = api_key
 
 def get_llm():
+    # Ensure API key is available
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise ValueError(
+            "OpenRouter API key not configured. Please either:\n"
+            "1. Set OPENROUTER_API_KEY environment variable, or\n"
+            "2. Enter your API key in the Streamlit app and save it"
+        )
+    
     # llm = ChatGoogleGenerativeAI(
     #     model="gemini-2.5-pro", 
     #     temperature=0.0, 
@@ -81,7 +92,7 @@ def get_llm():
     # )
     llm = ChatOpenAI(
         openai_api_base="https://openrouter.ai/api/v1",
-        openai_api_key=os.getenv("OPENROUTER_API_KEY"),
+        openai_api_key=api_key,
         model="google/gemini-2.5-pro",
         streaming=False, 
         temperature=0.0,
