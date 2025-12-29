@@ -1,7 +1,6 @@
 import os
 import builtins
 import math
-import platform
 import argparse
 import json
 from collections import Counter
