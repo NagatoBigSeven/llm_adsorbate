@@ -402,7 +402,7 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
 
 def read_atoms_object(slab_path: str) -> ase.Atoms:
     try:
-        atoms = read(slab_path)  # Read slab structure from .xyz or .cif file.
+        atoms = read(slab_path)  # ASE auto-detects format (XYZ, CIF, PDB, SDF, MOL, POSCAR, etc.)
         logger.info("Read slab atoms from {slab_path}.")
         return atoms
     except Exception as e:
@@ -413,9 +413,41 @@ def read_atoms_object(slab_path: str) -> ase.Atoms:
 def prepare_slab(slab_atoms: ase.Atoms) -> Tuple[ase.Atoms, bool]:
     """
     Clean Slab metadata and expand supercell if needed for physical accuracy.
+    
+    Validates periodicity for non-crystallographic inputs (PDB, MOL, SDF).
     Returns: (Processed Slab, Is Expanded)
     """
     print("--- 🛠️ [Prepare] Cleaning Slab metadata and checking dimensions... ---")
+    
+    # 0. Periodicity validation for non-crystallographic inputs (PDB, MOL, SDF, etc.)
+    pbc = slab_atoms.get_pbc()
+    if not any(pbc):
+        logger.warning(
+            "Input structure has no periodic boundary conditions (PBC). "
+            "This typically indicates a molecular cluster (e.g., from PDB/MOL files), not a surface slab. "
+            "AdsKRK is designed for periodic surfaces; results may be unreliable."
+        )
+        print("--- ⚠️ [Prepare] WARNING: Non-periodic structure detected. Setting fallback PBC... ---")
+        
+        # Force 2D periodic boundary conditions (typical for surface slabs)
+        slab_atoms.set_pbc([True, True, False])
+        
+        # If no cell is defined, create one with vacuum padding
+        if slab_atoms.cell.volume < 1e-6:
+            positions = slab_atoms.get_positions()
+            min_pos = positions.min(axis=0)
+            max_pos = positions.max(axis=0)
+            extent = max_pos - min_pos
+            
+            # Create cell with 15Å padding in XY and 20Å vacuum in Z
+            cell_a = extent[0] + 15.0
+            cell_b = extent[1] + 15.0
+            cell_c = extent[2] + 20.0
+            
+            slab_atoms.set_cell([cell_a, cell_b, cell_c])
+            slab_atoms.center()
+            logger.info(f"Created fallback cell: {cell_a:.1f} x {cell_b:.1f} x {cell_c:.1f} Å")
+            print(f"--- 🛠️ [Prepare] Created fallback cell: {cell_a:.1f} x {cell_b:.1f} x {cell_c:.1f} Å ---")
     
     # 1. Clean metadata (Fix autoadsorbate crash when parsing extxyz extra columns)
     symbols = slab_atoms.get_chemical_symbols()

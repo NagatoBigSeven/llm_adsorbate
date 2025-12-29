@@ -3,6 +3,7 @@ import os
 import re
 import tempfile
 import uuid
+from pathlib import Path
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
@@ -87,7 +88,14 @@ if openrouter_api_key:
 
 st.sidebar.header("Inputs")
 smiles_input = st.sidebar.text_input("SMILES String")
-xyz_file = st.sidebar.file_uploader("Slab XYZ file", type=['xyz'])
+
+# Supported structure formats (ASE-compatible)
+SUPPORTED_STRUCTURE_FORMATS = ['xyz', 'cif', 'pdb', 'sdf', 'mol', 'poscar', 'vasp']
+structure_file = st.sidebar.file_uploader(
+    "Slab Structure File", 
+    type=SUPPORTED_STRUCTURE_FORMATS,
+    help="Supports XYZ, CIF, PDB, SDF, MOL, POSCAR/VASP formats"
+)
 user_query = st.sidebar.text_area("User Query", value="")
 
 run_button = st.sidebar.button("Run Agent")
@@ -104,12 +112,14 @@ if run_button:
         st.sidebar.error("Please enter your OpenRouter API Key.")
     elif not smiles_input:
         st.sidebar.error("Please enter a SMILES string.")
-    elif not xyz_file:
-        st.sidebar.error("Please upload a slab XYZ file.")
+    elif not structure_file:
+        st.sidebar.error("Please upload a slab structure file.")
     else:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".xyz", mode='w') as tmp_file:
-            xyz_content = xyz_file.getvalue().decode('utf-8')
-            tmp_file.write(xyz_content)
+        # Preserve original file extension for ASE format auto-detection
+        file_ext = Path(structure_file.name).suffix.lower() or ".xyz"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext, mode='w') as tmp_file:
+            file_content = structure_file.getvalue().decode('utf-8')
+            tmp_file.write(file_content)
             tmp_file_path = tmp_file.name
         
         try:
@@ -124,9 +134,9 @@ if run_button:
                 session_id=session_id
             )
             
-            st.session_state.messages.append({"role": "user", "content": f"**Inputs provided:**\n- SMILES: `{smiles_input}`\n- Slab file: `{xyz_file.name}`\n- Query: `{user_query}`\n\n**Generated prompt for the agent...**"})
+            st.session_state.messages.append({"role": "user", "content": f"**Inputs provided:**\n- SMILES: `{smiles_input}`\n- Structure file: `{structure_file.name}`\n- Query: `{user_query}`\n\n**Generated prompt for the agent...**"})
             with st.chat_message("user"):
-                st.markdown(f"**Inputs provided:**\n- SMILES: `{smiles_input}`\n- Slab file: `{xyz_file.name}`\n- Query: `{user_query}`")
+                st.markdown(f"**Inputs provided:**\n- SMILES: `{smiles_input}`\n- Structure file: `{structure_file.name}`\n- Query: `{user_query}`")
 
             with st.chat_message("assistant"):
                 final_answer = ""

@@ -7,7 +7,7 @@ Your task is to systematically find the **lowest energy** (i.e., most stable) ad
 
 **Input Information:**
 - SMILES: {smiles}
-- Slab File Path: {slab_xyz_path}
+- Slab File Path: {slab_path} (supports XYZ, CIF, PDB, SDF, MOL, POSCAR formats)
 - Surface Composition: {surface_composition}
 - Available Sites List: {available_sites_description}
 - User Request: {user_request}
@@ -142,5 +142,5 @@ The length of `adsorbate_binding_indices` **determines** the orientation (1 = en
     }}
 **--- End of Example 2 ---**
 """,
-    input_variables=["smiles", "slab_xyz_path", "surface_composition", "available_sites_description", "user_request", "history", "MAX_RETRIES", "autoadsorbate_context"]
+    input_variables=["smiles", "slab_path", "surface_composition", "available_sites_description", "user_request", "history", "MAX_RETRIES", "autoadsorbate_context"]
 )

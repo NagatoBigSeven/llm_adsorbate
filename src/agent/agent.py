@@ -172,7 +172,7 @@ def solution_planner_node(state: AgentState) -> dict:
     
     prompt_input = {
         "smiles": state["smiles"],
-        "slab_xyz_path": state["slab_path"],
+        "slab_path": state["slab_path"],
         "surface_composition": state.get("surface_composition", "Unknown"),
         "user_request": state["user_request"],
         "history": "\n".join(state["history"]) if state.get("history") else "None",
@@ -820,7 +820,7 @@ def _prepare_initial_state(
     
     Args:
         smiles: SMILES string for the adsorbate
-        slab_path: Path to slab XYZ file
+        slab_path: Path to slab structure file (supports XYZ, CIF, PDB, SDF, MOL, POSCAR)
         user_request: User's natural language request
         api_key: OpenRouter API key for this session
         session_id: UUID for file path isolation
@@ -846,7 +846,7 @@ def _prepare_initial_state(
 def parse_args():
     parser = argparse.ArgumentParser(description="Run the Adsorb-Agent.")
     parser.add_argument("--smiles", type=str, required=True, help="SMILES string.")
-    parser.add_argument("--slab_path", type=str, required=True, help="Path to the slab .xyz file.")
+    parser.add_argument("--slab_path", type=str, required=True, help="Path to the slab structure file (XYZ, CIF, PDB, SDF, MOL, POSCAR).")
     parser.add_argument("--user_request", type=str, default="Find a stable adsorption configuration.", help="User's request.")
     return parser.parse_args()
 
