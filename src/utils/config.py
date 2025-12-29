@@ -107,3 +107,20 @@ def is_env_key_set() -> bool:
         bool: True if OPENROUTER_API_KEY environment variable is set.
     """
     return bool(os.environ.get("OPENROUTER_API_KEY"))
+
+
+def get_calculator_backend() -> str:
+    """
+    Get the calculator backend name from environment variable.
+    
+    The backend can be configured via the ADSKRK_BACKEND environment variable.
+    Defaults to "mace" if not set.
+    
+    Available backends:
+    - "mace": MACE-MP foundation model (default, recommended)
+    - "openmd": OpenMD (not yet implemented)
+    
+    Returns:
+        str: Backend name (e.g., "mace", "openmd")
+    """
+    return os.environ.get("ADSKRK_BACKEND", "mace")

@@ -20,8 +20,10 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from ase.optimize import BFGS
 import autoadsorbate
 import torch
-from mace.calculators import mace_mp
 from dotenv import load_dotenv
+
+# Calculator backend abstraction
+from src.calculators import get_backend
 
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -338,40 +340,36 @@ def tool_executor_node(state: AgentState) -> dict:
         if is_expanded:
             tool_logs.append("Note: Slab was automatically expanded (2x2) for physical accuracy.")
         
-        # 3. Initialize Calculator
+        # 3. Initialize Calculator via Backend Abstraction
         try:
-            # Define relaxation parameters uniformly
+            # Get the calculator backend (defaults to MACE)
+            backend_name = os.getenv("ADSKRK_BACKEND", "mace")
+            backend = get_backend(backend_name)
+            
+            # Check GPU availability
             has_cuda = torch.cuda.is_available()
-
-            if not has_cuda:
-                opt_fmax = 0.10
-                opt_steps = 200
-                md_steps = 0
-                md_temp = 150.0
-                mace_model = "small"
-                mace_device = "cpu"
-                mace_precision = "float32" if platform.system() == "Darwin" else "float64"
-                use_dispersion = False
-            else:
-                opt_fmax = 0.05
-                opt_steps = 500
-                md_steps = 20
-                md_temp = 150.0
-                mace_model = "large"
-                mace_device = "cuda"
-                mace_precision = "float64"
-                use_dispersion = True
-
-            # temp_calc here is mainly used for E_adsorbate and E_surface
-            temp_calc = mace_mp(
-                model=mace_model,
-                device=mace_device,
-                default_dtype=mace_precision,
-                dispersion=use_dispersion,
+            
+            # Get platform-specific configuration from backend
+            calc_config = backend.get_default_config(has_gpu=has_cuda)
+            relax_params = backend.get_default_relaxation_params(has_gpu=has_cuda)
+            
+            # Extract parameters for use in this function
+            opt_fmax = relax_params.fmax
+            opt_steps = relax_params.steps
+            md_steps = relax_params.md_steps
+            md_temp = relax_params.md_temp
+            
+            # Get calculator instance
+            temp_calc = backend.get_calculator(calc_config)
+            
+            # Log configuration for debugging
+            logger.info(
+                f"Using {backend.name} backend: device={calc_config.device}, "
+                f"model={calc_config.model}, precision={calc_config.precision}"
             )
 
         except Exception as e_calc:
-            raise ValueError(f"Failed to initialize MACE calculator: {e_calc}")
+            raise ValueError(f"Failed to initialize calculator: {e_calc}")
 
         # 4. Calculate E_surface
         try:
@@ -451,20 +449,17 @@ def tool_executor_node(state: AgentState) -> dict:
         logger.info("Starting structure relaxation...")
         slab_indices = list(range(len(final_slab_atoms)))
         relax_n = plan_solution.get("relax_top_n", 1)
-        print(f"--- 🛠️ MACE using device: {mace_device} ---")
+        print(f"--- 🛠️ Using {backend.name} backend on device: {calc_config.device} ---")
 
         final_traj_file = relax_atoms(
             atoms_list=list(initial_conformers),
             slab_indices=slab_indices,
+            calculator=temp_calc,
             relax_top_n=relax_n,
             fmax=opt_fmax,
             steps=opt_steps,
             md_steps=md_steps,
             md_temp=md_temp,
-            mace_model=mace_model,
-            mace_device=mace_device,
-            mace_precision=mace_precision,
-            use_dispersion=use_dispersion
         )
         tool_logs.append(f"Success: Structure relaxation complete (Relaxed Top {relax_n}). Trajectory saved to '{final_traj_file}'.")
         

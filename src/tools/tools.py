@@ -267,7 +267,6 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from ase.neighborlist import build_neighbor_list, natural_cutoffs
 from ase.optimize import BFGS
 from autoadsorbate import Surface, Fragment
-from mace.calculators import mace_mp
 import os
 import platform
 import json
@@ -948,38 +947,37 @@ def populate_surface_with_fragment(
     print(f"--- 🛠️ Configurations saved to {traj_file} ---")
     return traj_file
 
-# Global cache for MACE calculator to avoid reloading model on every call
-_CACHED_MACE_CALC = None
-_CACHED_MACE_KEY = None
+# Note: Calculator caching is now handled by the backend module (src/calculators/)
 
 def relax_atoms(
     atoms_list: list,
     slab_indices: list,
+    calculator,  # ASE-compatible calculator (any backend)
     relax_top_n: int = 1,
     fmax: float = 0.05,
     steps: int = 500,
     md_steps: int = 20,
     md_temp: float = 150.0,
-    mace_model: str = "small",
-    mace_device: str = "cpu",
-    mace_precision: str = "float32",
-    use_dispersion: bool = False
 ) -> str:
-    global _CACHED_MACE_CALC, _CACHED_MACE_KEY
+    """
+    Relax a list of atomic structures using the provided calculator.
 
-    # Create a config key to check if we can reuse the cached calculator
-    current_config_key = (mace_model, mace_device, mace_precision, use_dispersion)
+    This function is backend-agnostic and works with any ASE-compatible calculator
+    (MACE, OpenMD, DeePMD, etc.).
 
-    try:
-        if _CACHED_MACE_CALC is None or _CACHED_MACE_KEY != current_config_key:
-            print(f"--- 🛠️ Initializing MACE Calculator (Model: {mace_model}, Device: {mace_device})... ---")
-            _CACHED_MACE_CALC = mace_mp(model=mace_model, device=mace_device, default_dtype=mace_precision, dispersion=use_dispersion)
-            _CACHED_MACE_KEY = current_config_key
-        
-        calculator = _CACHED_MACE_CALC
-    except Exception as e:
-        logger.error("MACE Initialization Failed: {e}")
-        raise
+    Args:
+        atoms_list: List of ASE Atoms objects to relax
+        slab_indices: Indices of slab atoms (will be constrained during optimization)
+        calculator: ASE-compatible calculator instance
+        relax_top_n: Number of top configurations to relax (by energy)
+        fmax: Maximum force tolerance for optimization (eV/Å)
+        steps: Maximum optimization steps
+        md_steps: Number of MD warmup steps (0 to disable)
+        md_temp: MD temperature in Kelvin
+
+    Returns:
+        Path to the output trajectory file
+    """
 
     if not os.path.exists('outputs'):
         os.makedirs('outputs')
