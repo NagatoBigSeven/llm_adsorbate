@@ -4,7 +4,7 @@ import math
 import argparse
 import json
 from collections import Counter
-from typing import TypedDict, List, Optional
+from typing import TypedDict, List, Optional, Dict, Any
 import numpy as np
 import pandas as pd
 import scipy
@@ -24,8 +24,9 @@ from dotenv import load_dotenv
 # Calculator backend abstraction
 from src.calculators import get_backend
 
-from langchain_openai import ChatOpenAI
-from langchain_google_genai import ChatGoogleGenerativeAI
+# LLM backend abstraction
+from src.llms import get_llm_backend
+
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage, ToolMessage
 from langgraph.graph import StateGraph, END
 from langchain_core.output_parsers import JsonOutputParser
@@ -55,6 +56,9 @@ class AgentState(TypedDict):
     # Session isolation
     session_id: str  # UUID for file path isolation
     api_key: str     # API key for this session (not from global env)
+    # LLM configuration
+    llm_backend: str  # LLM backend name ("google", "openrouter", "ollama", "huggingface")
+    llm_config: Optional[Dict[str, Any]]  # Optional LLM configuration overrides
     # Input data
     smiles: str
     slab_path: str
@@ -78,39 +82,56 @@ load_dotenv()
 # Note: API key is now passed via AgentState, not global env var
 # This prevents key leakage between concurrent sessions
 
+# Default LLM backend (can be overridden via environment variable)
+DEFAULT_LLM_BACKEND = "google"
 
-def get_llm(api_key: str):
+
+def get_llm(api_key: str, backend_name: str = None, llm_config: dict = None):
     """
-    Create an LLM instance with the provided API key.
+    Create an LLM instance using the configured backend.
+    
+    This function uses a factory pattern to support multiple LLM backends:
+    - google: Direct Google AI (Gemini) - Default
+    - openrouter: OpenRouter API (multiple providers)
+    - ollama: Local Ollama service
+    - huggingface: Local HuggingFace Transformers
     
     Args:
-        api_key: OpenRouter API key for this session
+        api_key: API key for cloud backends (ignored for local backends)
+        backend_name: Backend name (defaults to ADSKRK_LLM_BACKEND env var or "google")
+        llm_config: Optional configuration overrides
         
     Returns:
-        ChatOpenAI instance configured for Gemini
+        LangChain-compatible chat model instance
     """
-    if not api_key:
+    # Determine backend
+    if backend_name is None:
+        backend_name = os.environ.get("ADSKRK_LLM_BACKEND", DEFAULT_LLM_BACKEND)
+    
+    # Get backend instance
+    backend = get_llm_backend(backend_name)
+    
+    # Validate API key for cloud backends
+    if backend.requires_api_key and not api_key:
         raise ValueError(
-            "OpenRouter API key not provided. Please enter your API key in the app."
+            f"{backend_name.capitalize()} backend requires an API key. "
+            f"Please enter your API key in the app or set the appropriate environment variable."
         )
     
-    # llm = ChatGoogleGenerativeAI(
-    #     model="gemini-2.5-pro", 
-    #     temperature=0.0, 
-    #     max_tokens=4096, 
-    #     timeout=120, 
-    # )
-    llm = ChatOpenAI(
-        openai_api_base="https://openrouter.ai/api/v1",
-        openai_api_key=api_key,
-        model="google/gemini-2.5-pro",
-        streaming=False, 
-        temperature=0.0,
-        max_tokens=4096, 
-        timeout=120, 
-        seed=42
-    )
-    return llm
+    # Get default config
+    config = backend.get_default_config(api_key=api_key)
+    
+    # Apply overrides from llm_config
+    if llm_config:
+        for key, value in llm_config.items():
+            if hasattr(config, key):
+                setattr(config, key, value)
+            elif key in ("host", "device", "quantize"):
+                # Backend-specific options go into extra_options
+                config.extra_options[key] = value
+    
+    logger.info(f"Using LLM backend: {backend_name} (model: {config.model})")
+    return backend.get_chat_model(config)
 
 def make_plan_key(plan_json: Optional[dict]) -> Optional[str]:
     if not plan_json or not isinstance(plan_json, dict):
@@ -157,7 +178,11 @@ def pre_processor_node(state: AgentState) -> dict:
 
 def solution_planner_node(state: AgentState) -> dict:
     logger.info("Calling Planner Node")
-    llm = get_llm(state["api_key"])
+    llm = get_llm(
+        state["api_key"],
+        backend_name=state.get("llm_backend"),
+        llm_config=state.get("llm_config")
+    )
     messages = []
 
     try:
@@ -535,7 +560,11 @@ def final_analyzer_node(state: AgentState) -> dict:
     Function: Generate report based on global best results, distinguishing between perfect adsorption and intramolecular rearrangement.
     """
     print("--- ✍️ Calling Final Analyzer Node ---")
-    llm = get_llm(state["api_key"])
+    llm = get_llm(
+        state["api_key"],
+        backend_name=state.get("llm_backend"),
+        llm_config=state.get("llm_config")
+    )
     
     # 1. Extract Data Sources
     best_result = state.get("best_result")
@@ -813,7 +842,9 @@ def _prepare_initial_state(
     slab_path: str, 
     user_request: str,
     api_key: str,
-    session_id: str
+    session_id: str,
+    llm_backend: str = None,
+    llm_config: dict = None
 ) -> AgentState:
     """
     Prepare initial agent state with session isolation.
@@ -822,12 +853,16 @@ def _prepare_initial_state(
         smiles: SMILES string for the adsorbate
         slab_path: Path to slab structure file (supports XYZ, CIF, PDB, SDF, MOL, POSCAR)
         user_request: User's natural language request
-        api_key: OpenRouter API key for this session
+        api_key: API key for this session (required for cloud backends)
         session_id: UUID for file path isolation
+        llm_backend: LLM backend name ("google", "openrouter", "ollama", "huggingface")
+        llm_config: Optional LLM configuration overrides
     """
     return {
         "session_id": session_id,
         "api_key": api_key,
+        "llm_backend": llm_backend or os.environ.get("ADSKRK_LLM_BACKEND", DEFAULT_LLM_BACKEND),
+        "llm_config": llm_config,
         "smiles": smiles,
         "slab_path": slab_path,
         "surface_composition": None,
@@ -854,10 +889,29 @@ def main_cli():
     args = parse_args()
     if not os.path.exists('./outputs'):
         os.makedirs('./outputs')
-    initial_state = _prepare_initial_state(args.smiles, args.slab_path, args.user_request)
+    
+    # Get API key from environment or config
+    api_key, _ = get_api_key()
+    
+    # Generate session ID for file isolation
+    import uuid
+    session_id = str(uuid.uuid4())[:8]
+    
+    # Get LLM backend from environment or config
+    from src.utils.config import get_llm_backend_name as get_backend_name
+    llm_backend = get_backend_name()
+    
+    initial_state = _prepare_initial_state(
+        smiles=args.smiles, 
+        slab_path=args.slab_path, 
+        user_request=args.user_request,
+        api_key=api_key,
+        session_id=session_id,
+        llm_backend=llm_backend
+    )
     
     agent_executor = get_agent_executor()
-    print("\n--- 🚀 Adsorb-Agent Started ---\n")
+    print(f"\n--- 🚀 Adsorb-Agent Started (Backend: {llm_backend}) ---\n")
     final_state = None
 
     config = {"recursion_limit": 50}

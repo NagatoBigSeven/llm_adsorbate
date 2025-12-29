@@ -26,7 +26,7 @@ Users can also interact with the agent - asking questions about the system or gu
 
 At the core of AdsKRK is [AutoAdsorbate](https://github.com/basf/autoadsorbate) - a powerful tool for generating chemically meaningful molecular and fragment configurations on surfaces, providing a search space for the agent.
 
-One particularly interesting finding during the hackathon was the agent’s ability to reason about molecular dynamics (MD) and relaxation trajectories. For example, in our demo case of CO₂ on a copper surface, Gemini 2.0 Pro can compare conformations before and after relaxation, and give its analysis accordingly:
+One particularly interesting finding during the hackathon was the agent’s ability to reason about molecular dynamics (MD) and relaxation trajectories. For example, in our demo case of CO₂ on a copper surface, Gemini 2.5 Pro can compare conformations before and after relaxation, and give its analysis accordingly:
 
 ```
 The stability of the initial adsorption configuration was assessed by performing a structural relaxation. Based on the output from the simulation, the fragment did not remain bound to the surface.

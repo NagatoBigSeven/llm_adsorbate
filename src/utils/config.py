@@ -124,3 +124,138 @@ def get_calculator_backend() -> str:
         str: Backend name (e.g., "mace", "openmd")
     """
     return os.environ.get("ADSKRK_BACKEND", "mace")
+
+
+# ============================================================
+# LLM Backend Configuration
+# ============================================================
+
+# Default LLM backend
+DEFAULT_LLM_BACKEND = "google"
+
+# Environment variable to API key mapping
+LLM_API_KEY_ENV_VARS = {
+    "google": "GOOGLE_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+}
+
+# Config file key mapping
+LLM_API_KEY_CONFIG_KEYS = {
+    "google": "google_api_key",
+    "openrouter": "openrouter_api_key",
+}
+
+
+def get_llm_backend_name() -> str:
+    """
+    Get the LLM backend name from environment variable or config.
+    
+    Priority order:
+    1. Environment variable (ADSKRK_LLM_BACKEND)
+    2. Config file (~/.adskrk/config.json -> llm_backend)
+    3. Default ("google")
+    
+    Available backends:
+    - "google": Google AI (Gemini) - Default
+    - "openrouter": OpenRouter API
+    - "ollama": Local Ollama service
+    - "huggingface": Local HuggingFace Transformers
+    
+    Returns:
+        str: LLM backend name
+    """
+    # Environment variable takes priority
+    env_backend = os.environ.get("ADSKRK_LLM_BACKEND")
+    if env_backend:
+        return env_backend
+    
+    # Check config file
+    config = load_config()
+    config_backend = config.get("llm_backend")
+    if config_backend:
+        return config_backend
+    
+    return DEFAULT_LLM_BACKEND
+
+
+def get_api_key_for_backend(backend: str) -> Tuple[Optional[str], ApiKeySource]:
+    """
+    Get the API key for a specific LLM backend.
+    
+    Priority order:
+    1. Environment variable (backend-specific, e.g., GOOGLE_API_KEY)
+    2. Config file (~/.adskrk/config.json)
+    3. None (user must input)
+    
+    Args:
+        backend: LLM backend name ("google", "openrouter", etc.)
+        
+    Returns:
+        Tuple of (api_key, source) where source is "env", "config", or None.
+    """
+    # Get the environment variable name for this backend
+    env_var = LLM_API_KEY_ENV_VARS.get(backend)
+    if env_var:
+        env_key = os.environ.get(env_var)
+        if env_key:
+            return (env_key, "env")
+    
+    # Check config file
+    config_key_name = LLM_API_KEY_CONFIG_KEYS.get(backend)
+    if config_key_name:
+        config = load_config()
+        config_key = config.get(config_key_name)
+        if config_key:
+            return (config_key, "config")
+    
+    # No key found (not required for local backends)
+    return (None, None)
+
+
+def save_api_key_for_backend(backend: str, api_key: str) -> bool:
+    """
+    Save the API key for a specific LLM backend to the config file.
+    
+    Args:
+        backend: LLM backend name ("google", "openrouter", etc.)
+        api_key: The API key to save.
+        
+    Returns:
+        bool: True if save was successful, False otherwise.
+    """
+    config_key_name = LLM_API_KEY_CONFIG_KEYS.get(backend)
+    if not config_key_name:
+        return False
+    
+    config = load_config()
+    config[config_key_name] = api_key
+    return save_config(config)
+
+
+def save_llm_backend(backend: str) -> bool:
+    """
+    Save the preferred LLM backend to the config file.
+    
+    Args:
+        backend: LLM backend name to save as default.
+        
+    Returns:
+        bool: True if save was successful, False otherwise.
+    """
+    config = load_config()
+    config["llm_backend"] = backend
+    return save_config(config)
+
+
+def is_cloud_backend(backend: str) -> bool:
+    """
+    Check if a backend is a cloud backend (requires API key).
+    
+    Args:
+        backend: LLM backend name
+        
+    Returns:
+        bool: True if the backend requires an API key
+    """
+    return backend in ("google", "openrouter")
+
