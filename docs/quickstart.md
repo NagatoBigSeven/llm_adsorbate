@@ -65,9 +65,9 @@ The app will open in your browser at `http://localhost:8501`.
 
 | Input | Description | Example |
 |-------|-------------|---------|
-| **SMILES** | Molecule structure | `CO2`, `H2O`, `CH3OH` |
+| **SMILES** | Molecule structure | `O=C=O`, `O`, `CO` |
 | **Slab File** | Surface structure file | Upload XYZ, CIF, or POSCAR |
-| **Query** | What you want to find | "Find a stable adsorption site" |
+| **Query** | What you want to find | "Find the most stable adsorption site" |
 
 ### 3. Click "▶️ Run"
 
@@ -89,11 +89,12 @@ The agent will:
 
 **What happens:**
 
-1. Agent identifies possible binding sites (top, bridge, hollow)
-2. Generates configurations with different orientations
-3. Runs MACE relaxation for each
-4. Compares energies and identifies the most stable
-5. Reports findings with structural analysis
+1. Agent analyzes surface structure and identifies binding site types
+2. Proposes a binding configuration based on chemical reasoning
+3. Runs MACE relaxation to test stability
+4. Analyzes results — if unstable, proposes a different configuration
+5. Iterates until finding a stable configuration
+6. Reports findings with structural analysis
 
 ## Supported File Formats
 
@@ -107,7 +108,7 @@ The agent will:
 
 ## Tips
 
-- **Start simple**: Use small molecules like CO, H2O, or CO2
+- **Start simple**: Use small molecules like CO2, H2O, or CH4
 - **Be specific**: Clear queries get better results
 - **Check status**: The agent shows its reasoning in real-time
 - **Use Clear button**: Reset conversation between experiments
