@@ -2,6 +2,7 @@ import sys
 import os
 import re
 import tempfile
+import uuid
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
@@ -75,9 +76,9 @@ save_key_checkbox = st.sidebar.checkbox(
     help="Saves to ~/.adskrk/config.json" if not env_key_active else "Cannot save while environment variable is active"
 )
 
-# Set environment variable for current session
+# Note: API key is now passed directly to agent state, not via global env var
+# This prevents key leakage between concurrent sessions
 if openrouter_api_key:
-    os.environ["OPENROUTER_API_KEY"] = openrouter_api_key
     # Save if checkbox is checked and key is different from saved
     if save_key_checkbox and openrouter_api_key != saved_key:
         if save_api_key(openrouter_api_key):
@@ -112,10 +113,15 @@ if run_button:
             tmp_file_path = tmp_file.name
         
         try:
+            # Generate unique session ID for file isolation
+            session_id = str(uuid.uuid4())[:8]  # First 8 chars for brevity
+            
             initial_state = _prepare_initial_state(
                 smiles=smiles_input, 
                 slab_path=tmp_file_path, 
-                user_request=user_query
+                user_request=user_query,
+                api_key=openrouter_api_key,
+                session_id=session_id
             )
             
             st.session_state.messages.append({"role": "user", "content": f"**Inputs provided:**\n- SMILES: `{smiles_input}`\n- Slab file: `{xyz_file.name}`\n- Query: `{user_query}`\n\n**Generated prompt for the agent...**"})

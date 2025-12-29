@@ -791,6 +791,7 @@ def populate_surface_with_fragment(
     slab_atoms: ase.Atoms, 
     fragment_object: Fragment,
     plan_solution: dict,
+    session_id: str,  # UUID for session-isolated file paths
     **kwargs
 ) -> str:
     # --- 1. Retrieve plan from Fragment object ---
@@ -935,10 +936,13 @@ def populate_surface_with_fragment(
         raise ValueError(f"get_populated_sites failed to generate any configurations. overlap_thr ({overlap_thr}) might be too strict.")
     
     # Save ase.Atoms list to Trajectory object
-    if not os.path.exists('outputs'):
-        os.makedirs('outputs')
+    # Use session-isolated directory to prevent concurrent access conflicts
+    output_dir = f"outputs/{session_id}"
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
         
-    traj_file = f"outputs/generated_conformers_{fragment_object.info['plan_original_smiles'].replace('=','_').replace('#','_')}.traj"
+    clean_smiles = fragment_object.info['plan_original_smiles'].replace('=','_').replace('#','_')
+    traj_file = f"{output_dir}/conformers_{clean_smiles}.traj"
     traj = Trajectory(traj_file, 'w')
     for atoms in out_trj:
         traj.write(atoms)
@@ -953,6 +957,7 @@ def relax_atoms(
     atoms_list: list,
     slab_indices: list,
     calculator,  # ASE-compatible calculator (any backend)
+    session_id: str,  # UUID for session-isolated file paths
     relax_top_n: int = 1,
     fmax: float = 0.05,
     steps: int = 500,
@@ -969,6 +974,7 @@ def relax_atoms(
         atoms_list: List of ASE Atoms objects to relax
         slab_indices: Indices of slab atoms (will be constrained during optimization)
         calculator: ASE-compatible calculator instance
+        session_id: UUID for session-isolated file paths
         relax_top_n: Number of top configurations to relax (by energy)
         fmax: Maximum force tolerance for optimization (eV/Å)
         steps: Maximum optimization steps
@@ -1054,7 +1060,10 @@ def relax_atoms(
     print(f"--- 🛠️ Evaluation complete. Relaxing best {N_RELAX_TOP_N} of {len(atoms_list)} configurations. ---")
     
     # --- 3. Relaxation Phase (Only N_RELAX_TOP_N) ---
-    traj_file = f"outputs/relaxation_run.traj"
+    output_dir = f"outputs/{session_id}"
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    traj_file = f"{output_dir}/relaxation.traj"
     traj = Trajectory(traj_file, 'w')
     final_structures = []
 
@@ -1092,7 +1101,7 @@ def relax_atoms(
 
     traj.close()
     
-    final_traj_file = f"outputs/final_relaxed_structures.xyz"
+    final_traj_file = f"{output_dir}/final.xyz"
  
     try:
         write(final_traj_file, final_structures)
@@ -1123,6 +1132,7 @@ def analyze_relaxation_results(
     slab_atoms: ase.Atoms,
     original_smiles: str,
     plan_dict: dict,
+    session_id: str,  # UUID for session-isolated file paths
     e_surface_ref: float = 0.0,
     e_adsorbate_ref: float = 0.0
 ) -> str:
@@ -1606,7 +1616,8 @@ def analyze_relaxation_results(
         site_label = site_label.replace(" ", "_").replace("/", "-").replace("(", "").replace(")", "")
 
         clean_smiles = original_smiles.replace('=', '_').replace('#', '_').replace('[', '').replace(']', '')
-        best_atoms_filename = f"outputs/BEST_{clean_smiles}_{site_label}_E{E_ads:.3f}.xyz"
+        output_dir = f"outputs/{session_id}"
+        best_atoms_filename = f"{output_dir}/BEST_{clean_smiles}_{site_label}_E{E_ads:.3f}.xyz"
         
         try:
             write(best_atoms_filename, relaxed_atoms)

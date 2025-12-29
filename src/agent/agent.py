@@ -52,13 +52,19 @@ MAX_RETRIES = 5
 
 # --- 1. Define Agent State ---
 class AgentState(TypedDict):
+    # Session isolation
+    session_id: str  # UUID for file path isolation
+    api_key: str     # API key for this session (not from global env)
+    # Input data
     smiles: str
     slab_path: str
     surface_composition: Optional[List[str]]
     user_request: str
+    # Planning
     plan: Optional[dict]
     validation_error: Optional[str]
     messages: List[BaseMessage]
+    # Results
     analysis_json: Optional[str]
     history: List[str]
     best_result: Optional[dict]
@@ -69,20 +75,23 @@ class AgentState(TypedDict):
 # --- 2. Setup Environment and LLM ---
 load_dotenv()
 
-# Load API key from config (env var takes priority, then config file)
-api_key, api_key_source = get_api_key()
-if api_key:
-    # Set environment variable so it's available throughout the session
-    os.environ["OPENROUTER_API_KEY"] = api_key
+# Note: API key is now passed via AgentState, not global env var
+# This prevents key leakage between concurrent sessions
 
-def get_llm():
-    # Ensure API key is available
-    api_key = os.getenv("OPENROUTER_API_KEY")
+
+def get_llm(api_key: str):
+    """
+    Create an LLM instance with the provided API key.
+    
+    Args:
+        api_key: OpenRouter API key for this session
+        
+    Returns:
+        ChatOpenAI instance configured for Gemini
+    """
     if not api_key:
         raise ValueError(
-            "OpenRouter API key not configured. Please either:\n"
-            "1. Set OPENROUTER_API_KEY environment variable, or\n"
-            "2. Enter your API key in the Streamlit app and save it"
+            "OpenRouter API key not provided. Please enter your API key in the app."
         )
     
     # llm = ChatGoogleGenerativeAI(
@@ -148,7 +157,7 @@ def pre_processor_node(state: AgentState) -> dict:
 
 def solution_planner_node(state: AgentState) -> dict:
     logger.info("Calling Planner Node")
-    llm = get_llm()
+    llm = get_llm(state["api_key"])
     messages = []
 
     try:
@@ -436,7 +445,8 @@ def tool_executor_node(state: AgentState) -> dict:
         generated_traj_file = populate_surface_with_fragment(
             slab_atoms=final_slab_atoms,
             fragment_object=fragment_object,
-            plan_solution=plan_solution
+            plan_solution=plan_solution,
+            session_id=state["session_id"]
         )
         tool_logs.append(f"Success: Fragment placed on slab. Configs saved to: {generated_traj_file}")
 
@@ -454,6 +464,7 @@ def tool_executor_node(state: AgentState) -> dict:
             atoms_list=list(initial_conformers),
             slab_indices=slab_indices,
             calculator=temp_calc,
+            session_id=state["session_id"],
             relax_top_n=relax_n,
             fmax=opt_fmax,
             steps=opt_steps,
@@ -469,6 +480,7 @@ def tool_executor_node(state: AgentState) -> dict:
             slab_atoms=final_slab_atoms,
             original_smiles=state["smiles"],
             plan_dict=plan_json,
+            session_id=state["session_id"],
             e_surface_ref=E_surface,
             e_adsorbate_ref=E_adsorbate
         )
@@ -523,7 +535,7 @@ def final_analyzer_node(state: AgentState) -> dict:
     Function: Generate report based on global best results, distinguishing between perfect adsorption and intramolecular rearrangement.
     """
     print("--- ✍️ Calling Final Analyzer Node ---")
-    llm = get_llm()
+    llm = get_llm(state["api_key"])
     
     # 1. Extract Data Sources
     best_result = state.get("best_result")
@@ -796,8 +808,26 @@ def get_agent_executor():
     return workflow.compile()
 
 # --- 6. Run Program ---
-def _prepare_initial_state(smiles: str, slab_path: str, user_request: str) -> AgentState:
+def _prepare_initial_state(
+    smiles: str, 
+    slab_path: str, 
+    user_request: str,
+    api_key: str,
+    session_id: str
+) -> AgentState:
+    """
+    Prepare initial agent state with session isolation.
+    
+    Args:
+        smiles: SMILES string for the adsorbate
+        slab_path: Path to slab XYZ file
+        user_request: User's natural language request
+        api_key: OpenRouter API key for this session
+        session_id: UUID for file path isolation
+    """
     return {
+        "session_id": session_id,
+        "api_key": api_key,
         "smiles": smiles,
         "slab_path": slab_path,
         "surface_composition": None,
