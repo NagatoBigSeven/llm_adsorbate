@@ -27,7 +27,7 @@ uv pip install -e .
 2. Set the environment variable:
 
    ```bash
-   export GOOGLE_API_KEY="your-api-key"
+   export GOOGLE_API_KEY="your-google-api-key"
    ```
 
 ### Option B: OpenRouter
@@ -36,7 +36,7 @@ uv pip install -e .
 2. Set the environment variable:
 
    ```bash
-   export OPENROUTER_API_KEY="your-api-key"
+   export OPENROUTER_API_KEY="your-openrouter-api-key"
    ```
 
 ### Option C: Ollama (Local, No API Key)

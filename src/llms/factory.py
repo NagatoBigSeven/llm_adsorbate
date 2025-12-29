@@ -45,7 +45,7 @@ def get_llm_backend(name: str) -> BaseLLMBackend:
 
     Example:
         >>> backend = get_llm_backend("google")
-        >>> config = backend.get_default_config(api_key="your-key")
+        >>> config = backend.get_default_config(api_key="your-google-api-key")
         >>> llm = backend.get_chat_model(config)
     """
     registry = _get_llm_registry()

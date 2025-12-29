@@ -15,7 +15,7 @@ Usage:
 
     # Get a specific backend
     backend = get_llm_backend("google")
-    config = backend.get_default_config(api_key="your-key")
+    config = backend.get_default_config(api_key="your-google-api-key")
     llm = backend.get_chat_model(config)
 
     # List available backends

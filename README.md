@@ -42,7 +42,7 @@ cd llm_adsorbate
 uv pip install -e .
 
 # Set API key (Google AI is default)
-export GOOGLE_API_KEY="your-api-key"
+export GOOGLE_API_KEY="your-google-api-key"
 
 # Run the app
 streamlit run src/app/app.py
@@ -93,7 +93,7 @@ Multiple ways to provide your API key (in priority order):
 1. **Environment variable**:
 
    ```bash
-   export GOOGLE_API_KEY="your-key"
+   export GOOGLE_API_KEY="your-google-api-key"
    # or OPENROUTER_API_KEY for OpenRouter
    ```
 

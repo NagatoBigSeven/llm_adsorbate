@@ -7,7 +7,7 @@ AdsKRK supports multiple LLM backends for the agentic workflow. Choose between c
 The default backend is **Google AI (Gemini 2.5 Pro)**. Set your API key and run:
 
 ```bash
-export GOOGLE_API_KEY="your-api-key"
+export GOOGLE_API_KEY="your-google-api-key"
 streamlit run src/app/app.py
 ```
 
@@ -34,11 +34,11 @@ streamlit run src/app/app.py
 ```bash
 # Use Google AI (default)
 export ADSKRK_LLM_BACKEND=google
-export GOOGLE_API_KEY="your-key"
+export GOOGLE_API_KEY="your-google-api-key"
 
 # Use OpenRouter
 export ADSKRK_LLM_BACKEND=openrouter
-export OPENROUTER_API_KEY="your-key"
+export OPENROUTER_API_KEY="your-openrouter-api-key"
 
 # Use Ollama (local)
 export ADSKRK_LLM_BACKEND=ollama
@@ -72,14 +72,14 @@ Access multiple AI providers through a unified API.
 
 **Setup:**
 
-1. Get API key from [OpenRouter](https://openrouter.ai/)
+1. Get API key from [OpenRouter](https://openrouter.ai)
 2. Set `OPENROUTER_API_KEY` or enter in the app
 
 **Available Models:**
 
-- `google/gemini-2.5-pro`
-- `openai/gpt-4o`
-- `anthropic/claude-3.5-sonnet`
+- `google/gemini-3-pro`
+- `openai/gpt-5.2-pro`
+- `anthropic/claude-opus-4.5`
 - Any model from [OpenRouter's catalog](https://openrouter.ai/models)
 
 ## Local Backends
@@ -144,7 +144,7 @@ from src.llms import get_llm_backend
 backend = get_llm_backend("google")
 
 # Get default configuration
-config = backend.get_default_config(api_key="your-key")
+config = backend.get_default_config(api_key="your-api-key")
 
 # Customize
 config.model = "gemini-2.5-flash"
