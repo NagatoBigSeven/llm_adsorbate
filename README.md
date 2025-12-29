@@ -50,7 +50,7 @@ streamlit run src/app/app.py
 
 Then provide your inputs in the sidebar:
 
-1. **SMILES**: Molecule structure (e.g., `CO2`, `H2O`)
+1. **SMILES**: Molecule structure (e.g., `O=C=O` for CO₂, `O` for oxygen atom)
 2. **Slab File**: Upload your surface structure
 3. **Query**: What you want to find
 4. Click **▶️ Run**
@@ -105,6 +105,7 @@ Multiple ways to provide your API key (in priority order):
 ### Advanced Settings
 
 The app provides advanced settings (click ⚙️ Advanced Settings):
+
 * **Temperature**: 0.0 (deterministic) to 1.0 (creative)
 * **Max Tokens**: 256 to 16384
 
@@ -112,7 +113,7 @@ The app provides advanced settings (click ⚙️ Advanced Settings):
 
 One particularly interesting finding was the agent's ability to reason about relaxation trajectories. For CO₂ on a copper surface, Gemini 2.5 Pro can analyze:
 
-```
+```text
 The stability of the initial adsorption configuration was assessed by 
 performing a structural relaxation. Based on the output from the simulation, 
 the fragment did not remain bound to the surface.

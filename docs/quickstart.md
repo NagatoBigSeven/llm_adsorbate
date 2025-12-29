@@ -73,11 +73,12 @@ The app will open in your browser at `http://localhost:8501`.
 
 The agent will:
 
-1. Parse your molecule and surface
-2. Generate binding configurations using AutoAdsorbate
-3. Run relaxation simulations with MACE
-4. Analyze results and iterate
-5. Report the best configuration found
+1. Parse your adsorbate and surface structure file
+2. Propose an adsorption configuration based on chemical reasoning
+3. Populate the adsorbate onto the surface using AutoAdsorbate
+4. Run relaxation simulation with MACE
+5. Analyze results and iterate if needed
+6. Report the best configuration found
 
 ## Example: CO₂ on Copper
 
