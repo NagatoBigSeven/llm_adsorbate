@@ -3,6 +3,7 @@ from ase import Atoms
 from scipy.spatial.distance import cdist
 import autoadsorbate.Surf
 from src.utils.logger import get_logger
+from enum import Enum
 
 # Initialize logger for this module
 logger = get_logger(__name__)
@@ -35,6 +36,22 @@ HCP_DETECTION_RADIUS_ANGSTROM = 1.0  # XY distance threshold for HCP site detect
 
 # Slab expansion criteria
 MIN_CELL_SIZE_ANGSTROM = 6.0  # Minimum cell dimension before triggering 2x2 expansion
+
+# Surface relaxation settings
+FIXED_BOTTOM_FRACTION = 1.0 / 3.0  # Fraction of slab (by Z) to keep fixed in STANDARD mode
+
+
+class RelaxationMode(Enum):
+    """
+    Surface relaxation mode for adsorption calculations.
+    
+    FAST: All surface atoms fixed. Fastest option, suitable for rapid screening 
+          on personal computers (e.g., MacBook). Default mode.
+    STANDARD: Bottom 1/3 of slab fixed (by Z coordinate), top 2/3 + adsorbate relaxed.
+              Better accuracy for workstations/servers.
+    """
+    FAST = "fast"
+    STANDARD = "standard"
 
 
 def get_shrinkwrap_grid_fixed(
@@ -297,7 +314,7 @@ def get_atom_index_menu(original_smiles: str) -> str:
         print(f"--- 🛠️ Heavy atom index list generated: {json.dumps(heavy_atom_menu)} ---")
         return json.dumps(heavy_atom_menu, indent=2)
     except Exception as e:
-        logger.error("get_atom_index_menu failed: {e}")
+        logger.error(f"get_atom_index_menu failed: {e}")
         return json.dumps({"error": f"Unable to generate heavy atom index list: {e}"})
 
 def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[int], site_type: str) -> str:
@@ -334,7 +351,7 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
         
         # 3. Determine bond type based on electronic state
         if num_radicals > 0:
-            logger.info("Smart Bonding: Radical detected (N={num_radicals}) -> Using Covalent Single Bond (SINGLE)")
+            logger.info(f"Smart Bonding: Radical detected (N={num_radicals}) -> Using Covalent Single Bond (SINGLE)")
             # Strategy: Radicals form covalent bonds, physically clear, geometrically stable
             new_mol.AddBond(marker_idx, target_idx, Chem.rdchem.BondType.SINGLE)
             
@@ -366,10 +383,10 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
             # Catch errors just in case, but DATIVE + Neutral usually passes
             Chem.SanitizeMol(new_mol)
         except Exception as e:
-            logger.warning("Sanitize Warning: {e}")
+            logger.warning(f"Sanitize Warning: {e}")
 
         out_smiles = Chem.MolToSmiles(new_mol.GetMol(), canonical=False, rootedAtAtom=marker_idx)
-        logger.info("SMILES Translator Final Output: {out_smiles}")
+        logger.info(f"SMILES Translator Final Output: {out_smiles}")
         return out_smiles
 
     # --- Case B & C: bridge/hollow (Keep as is) ---
@@ -381,7 +398,7 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
             rw_mol.GetAtomWithIdx(target_idx).SetAtomMapNum(114514)
             original_smiles_mapped = Chem.MolToSmiles(rw_mol.GetMol(), canonical=False)
             out_smiles = f"{original_smiles_mapped}.[S:1].[S:2]"
-            logger.info("SMILES Translator Output: {out_smiles}")
+            logger.info(f"SMILES Translator Output: {out_smiles}")
             return out_smiles
 
         elif num_binding_indices == 2:
@@ -393,7 +410,7 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
             rw_mol.GetAtomWithIdx(idx2).SetAtomMapNum(1919810)
             original_smiles_mapped = Chem.MolToSmiles(rw_mol.GetMol(), canonical=False)
             out_smiles = f"{original_smiles_mapped}.[S:1].[S:2]"
-            logger.info("SMILES Translator Output: {out_smiles}")
+            logger.info(f"SMILES Translator Output: {out_smiles}")
             return out_smiles
         else:
             raise ValueError(f"'{site_type}' site does not support {num_binding_indices} binding indices.")
@@ -403,10 +420,10 @@ def generate_surrogate_smiles(original_smiles: str, binding_atom_indices: list[i
 def read_atoms_object(slab_path: str) -> ase.Atoms:
     try:
         atoms = read(slab_path)  # ASE auto-detects format (XYZ, CIF, PDB, SDF, MOL, POSCAR, etc.)
-        logger.info("Read slab atoms from {slab_path}.")
+        logger.info(f"Read slab atoms from {slab_path}.")
         return atoms
     except Exception as e:
-        logger.error("Unable to read {slab_path}: {e}")
+        logger.error(f"Unable to read {slab_path}: {e}")
         raise
 
 # --- Unified handling of surface expansion and cleaning ---
@@ -470,6 +487,23 @@ def prepare_slab(slab_atoms: ase.Atoms) -> Tuple[ase.Atoms, bool]:
         is_expanded = True
     else:
         print(f"--- 🛠️ [Prepare] Cell size sufficient (a={a_len:.2f}Å, b={b_len:.2f}Å). Keeping as is. ---")
+    
+    # 3. Vacuum layer thickness check
+    # Calculate vacuum as (cell height - slab thickness)
+    MIN_VACUUM_THICKNESS = 15.0  # Angstroms
+    cell_c = np.linalg.norm(clean_slab.get_cell()[2])
+    z_coords = clean_slab.positions[:, 2]
+    slab_thickness = z_coords.max() - z_coords.min()
+    vacuum_thickness = cell_c - slab_thickness
+    
+    if vacuum_thickness < MIN_VACUUM_THICKNESS:
+        logger.warning(
+            f"Vacuum layer thickness ({vacuum_thickness:.1f} Å) is less than recommended {MIN_VACUUM_THICKNESS} Å. "
+            f"This may cause spurious interactions between periodic images in Z direction."
+        )
+        print(f"--- ⚠️ [Prepare] WARNING: Thin vacuum layer ({vacuum_thickness:.1f} Å < {MIN_VACUUM_THICKNESS} Å recommended). ---")
+    else:
+        logger.info(f"Vacuum layer thickness: {vacuum_thickness:.1f} Å (OK)")
         
     return clean_slab, is_expanded
 
@@ -537,7 +571,7 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
         try:
             Chem.SanitizeMol(mol_for_opt)
         except Exception as e:
-            logger.warning("Sanitize Warning: {e}")
+            logger.warning(f"Sanitize Warning: {e}")
 
         params = AllChem.ETKDGv3()
         params.randomSeed = 0xF00D
@@ -572,7 +606,7 @@ def _get_fragment(SMILES: str, site_type: str, num_binding_indices: int, to_init
             try:
                 AllChem.UFFOptimizeMoleculeConfs(mol_for_opt)
             except Exception as e:
-                logger.warning("UFF Optimization Warning: {e}")
+                logger.warning(f"UFF Optimization Warning: {e}")
         
         mol_with_hs.RemoveAllConformers()
         for i, cid in enumerate(conf_ids):
@@ -995,6 +1029,7 @@ def relax_atoms(
     steps: int = 500,
     md_steps: int = 20,
     md_temp: float = 150.0,
+    relaxation_mode: str = "fast",  # "fast" or "standard"
 ) -> str:
     """
     Relax a list of atomic structures using the provided calculator.
@@ -1004,7 +1039,7 @@ def relax_atoms(
 
     Args:
         atoms_list: List of ASE Atoms objects to relax
-        slab_indices: Indices of slab atoms (will be constrained during optimization)
+        slab_indices: Indices of slab atoms (constrained based on relaxation_mode)
         calculator: ASE-compatible calculator instance
         session_id: UUID for session-isolated file paths
         relax_top_n: Number of top configurations to relax (by energy)
@@ -1012,6 +1047,7 @@ def relax_atoms(
         steps: Maximum optimization steps
         md_steps: Number of MD warmup steps (0 to disable)
         md_temp: MD temperature in Kelvin
+        relaxation_mode: "fast" (all slab fixed) or "standard" (bottom 1/3 fixed)
 
     Returns:
         Path to the output trajectory file
@@ -1023,8 +1059,26 @@ def relax_atoms(
     # Optimization: We only relax the best N configurations
     N_RELAX_TOP_N = relax_top_n
 
-    # Constraints
-    constraint = FixAtoms(indices=slab_indices)
+    # Determine which atoms to fix based on relaxation_mode
+    if relaxation_mode == "standard" and len(atoms_list) > 0 and len(slab_indices) > 0:
+        # STANDARD mode: Fix bottom 1/3 of slab atoms by Z coordinate
+        reference_atoms = atoms_list[0]
+        slab_z_coords = reference_atoms.positions[slab_indices, 2]
+        z_min, z_max = slab_z_coords.min(), slab_z_coords.max()
+        z_threshold = z_min + (z_max - z_min) * FIXED_BOTTOM_FRACTION
+        
+        fixed_indices = [idx for idx in slab_indices if reference_atoms.positions[idx, 2] < z_threshold]
+        logger.info(
+            f"STANDARD relaxation mode: Fixing {len(fixed_indices)}/{len(slab_indices)} "
+            f"bottom slab atoms (Z < {z_threshold:.2f} Å)"
+        )
+        print(f"--- 🛠️ STANDARD mode: Fixing bottom {len(fixed_indices)}/{len(slab_indices)} slab atoms ---")
+        constraint = FixAtoms(indices=fixed_indices)
+    else:
+        # FAST mode (default): Fix all slab atoms
+        if relaxation_mode != "fast":
+            logger.warning(f"Unknown relaxation_mode '{relaxation_mode}', defaulting to 'fast'")
+        constraint = FixAtoms(indices=slab_indices)
 
     def _get_bond_change_count(initial, final):
         if len(initial) != len(final):
@@ -1109,7 +1163,7 @@ def relax_atoms(
         adsorbate_indices = list(range(len(slab_indices), len(atoms)))
         initial_adsorbate = atoms.copy()[adsorbate_indices]
         
-        logger.info("Optimization (BFGS): fmax={fmax}, steps={steps} ")
+        logger.info(f"Optimization (BFGS): fmax={fmax}, steps={steps}")
         dyn_opt = BFGS(atoms, trajectory=None, logfile=None) 
         dyn_opt.attach(lambda: traj.write(atoms), interval=1)
         dyn_opt.run(fmax=fmax, steps=steps)
@@ -1138,7 +1192,7 @@ def relax_atoms(
     try:
         write(final_traj_file, final_structures)
     except Exception as e:
-        logger.error("Failed to write final_relaxed_structures.xyz: {e}")
+        logger.error(f"Failed to write final_relaxed_structures.xyz: {e}")
         raise
     
     print(f"--- 🛠️ Relaxation complete. Full Trajectory: {traj_file} | Final Structures ({len(final_structures)}): {final_traj_file} ---")
@@ -1351,7 +1405,7 @@ def analyze_relaxation_results(
                 else:
                     site_crystallography = "(Unknown Layer)"
             except Exception as e_cryst:
-                logger.warning("Crystallographic Analysis Warning: {e_cryst}")
+                logger.warning(f"Crystallographic Analysis Warning: {e_cryst}")
         
         # Append this suffix to actual_site_type so Agent can see the difference
         if site_crystallography:
@@ -1375,7 +1429,7 @@ def analyze_relaxation_results(
             target_atom_symbol = relaxed_atoms[target_atom_global_index].symbol
             target_atom_pos = relaxed_atoms[target_atom_global_index].position
 
-            logger.info("Analysis: (1-index mode) Checking first adsorbate atom, Symbol: '{target_atom_symbol}', Global Index: {target_atom_global_index}. ")
+            logger.info(f"Analysis: (1-index mode) Checking first adsorbate atom, Symbol: '{target_atom_symbol}', Global Index: {target_atom_global_index}.")
 
             # --- Find all bonded surface atoms, not just the nearest one ---
             bonded_surface_atoms = []
@@ -1490,7 +1544,7 @@ def analyze_relaxation_results(
             target_atom_global_index = adsorbate_indices[0]
             target_atom_symbol = relaxed_atoms[target_atom_global_index].symbol
             target_atom_pos = relaxed_atoms[target_atom_global_index].position
-            logger.info("Analysis: (2-index mode) Checking first adsorbate atom, Symbol: '{target_atom_symbol}', Global Index: {target_atom_global_index}. ")
+            logger.info(f"Analysis: (2-index mode) Checking first adsorbate atom, Symbol: '{target_atom_symbol}', Global Index: {target_atom_global_index}.")
 
             distances = np.linalg.norm(slab_atoms.positions - target_atom_pos, axis=1)
             min_distance = np.min(distances)
@@ -1505,7 +1559,7 @@ def analyze_relaxation_results(
             second_atom_global_index = adsorbate_indices[1]
             second_atom_symbol = relaxed_atoms[second_atom_global_index].symbol
             second_atom_pos = relaxed_atoms[second_atom_global_index].position
-            logger.info("Analysis: (side-on mode) Checking second adsorbate atom, Symbol: '{second_atom_symbol}', Global Index: {second_atom_global_index}. ")
+            logger.info(f"Analysis: (side-on mode) Checking second adsorbate atom, Symbol: '{second_atom_symbol}', Global Index: {second_atom_global_index}.")
             
             distances_2 = np.linalg.norm(slab_atoms.positions - second_atom_pos, axis=1)
             min_distance_2 = np.min(distances_2)

@@ -230,7 +230,28 @@ with st.sidebar.expander("⚙️ Advanced Settings"):
         help="Maximum response length"
     )
     
-    st.caption("These settings affect LLM response generation.")
+    st.markdown("---")
+    st.subheader("🔬 Calculation Settings")
+    
+    relaxation_mode = st.selectbox(
+        "Surface Relaxation Mode",
+        options=["fast", "standard"],
+        index=0,
+        help="FAST: All surface atoms fixed (faster, for laptops). STANDARD: Bottom 1/3 fixed (more accurate, for workstations)."
+    )
+    
+    random_seed_input = st.number_input(
+        "Random Seed",
+        min_value=0,
+        max_value=999999,
+        value=0,
+        step=1,
+        help="Set to 0 for random behavior, or any other value for reproducible runs"
+    )
+    # Convert 0 to None (meaning random)
+    random_seed = None if random_seed_input == 0 else random_seed_input
+    
+    st.caption("These settings affect calculation behavior.")
 
 # Build llm_config from UI settings
 llm_config = {
@@ -304,11 +325,14 @@ if run_button:
                 api_key=api_key_input,  # May be None for local backends
                 session_id=session_id,
                 llm_backend=selected_backend,
-                llm_config=llm_config
+                llm_config=llm_config,
+                random_seed=random_seed,
+                relaxation_mode=relaxation_mode
             )
             
             # User message with full configuration
-            config_summary = f"**Inputs:**\n- SMILES: `{smiles_input}`\n- Structure: `{structure_file.name}`\n- Query: `{user_query}`\n\n**LLM Config:**\n- Backend: `{LLM_BACKEND_LABELS[selected_backend]}`\n- Model: `{model_display}`"
+            seed_display = random_seed if random_seed else "random"
+            config_summary = f"**Inputs:**\n- SMILES: `{smiles_input}`\n- Structure: `{structure_file.name}`\n- Query: `{user_query}`\n\n**Config:**\n- Backend: `{LLM_BACKEND_LABELS[selected_backend]}`\n- Model: `{model_display}`\n- Relaxation: `{relaxation_mode}`\n- Seed: `{seed_display}`"
             st.session_state.messages.append({"role": "user", "content": config_summary})
             with st.chat_message("user"):
                 st.markdown(config_summary)
@@ -389,3 +413,12 @@ with st.sidebar.expander("ℹ️ Quick Start Guide"):
     - Click ▶️ Run to start
     - Click 🗑️ Clear to reset
     """)
+
+# Scientific disclaimer
+st.sidebar.markdown("---")
+st.sidebar.caption(
+    "⚠️ **Disclaimer**: AdsKRK is an AI-assisted screening tool. "
+    "Results should be validated with DFT or experimental methods before publication. "
+    "Energy values are computed at 0K without thermal/entropic corrections. "
+    "See [documentation](docs/quickstart.md) for details."
+)

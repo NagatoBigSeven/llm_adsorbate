@@ -59,6 +59,10 @@ class AgentState(TypedDict):
     # LLM configuration
     llm_backend: str  # LLM backend name ("google", "openrouter", "ollama", "huggingface")
     llm_config: Optional[Dict[str, Any]]  # Optional LLM configuration overrides
+    # Reproducibility
+    random_seed: Optional[int]  # Optional random seed for reproducible runs (None = not fixed)
+    # Relaxation settings
+    relaxation_mode: str  # "fast" (all slab fixed) or "standard" (bottom 1/3 fixed)
     # Input data
     smiles: str
     slab_path: str
@@ -155,7 +159,7 @@ def make_plan_key(plan_json: Optional[dict]) -> Optional[str]:
         key = f"{site_type}|{surf_atoms_str}|{ads_indices_str}|{ads_type}|{float(touch_sphere):.1f}"
         return key
     except Exception as e:
-        logger.warning("make_plan_key failed: {e}")
+        logger.warning(f"make_plan_key failed: {e}")
         return None
 
 # --- 3. Define LangGraph Nodes ---
@@ -169,7 +173,7 @@ def pre_processor_node(state: AgentState) -> dict:
         }
     except Exception as e:
         error_message = f"Error: Unable to read Slab file '{state['slab_path']}': {e}"
-        logger.info("Validation Failed: {error_message} ")
+        logger.info(f"Validation Failed: {error_message}")
         return {
             "validation_error": error_message,
             "surface_composition": None,
@@ -190,7 +194,7 @@ def solution_planner_node(state: AgentState) -> dict:
         if "error" in atom_menu_json:
             raise ValueError(atom_menu_json)
     except Exception as e:
-        logger.error("fatal error: Unable to generate atom menu for SMILES {state['smiles']}: {e}")
+        logger.error(f"fatal error: Unable to generate atom menu for SMILES {state['smiles']}: {e}")
         return {
             "validation_error": f"False, fatal error: Unable to generate atom menu for SMILES {state['smiles']}: {e}"
         }
@@ -232,8 +236,8 @@ def solution_planner_node(state: AgentState) -> dict:
             "validation_error": None
         }
     except Exception as e:
-        logger.error("Planner Output JSON Parse Failed: {e}")
-        logger.info("Raw Output: {response.content} ")
+        logger.error(f"Planner Output JSON Parse Failed: {e}")
+        logger.info(f"Raw Output: {response.content}")
         return {
             "plan": None,
             "validation_error": f"False, Planner output format error: {e}. Please output strictly in JSON format.",
@@ -251,7 +255,7 @@ def plan_validator_node(state: AgentState) -> dict:
             raise ValueError(f"RDKit returned None. SMILES might be invalid or contain valences RDKit cannot handle.")
     except Exception as e:
         error = f"False, Base SMILES string '{state['smiles']}' cannot be parsed by RDKit. This is an unrecoverable error. Please check SMILES. Error: {e}"
-        logger.info("Validation Failed: {error} ")
+        logger.info(f"Validation Failed: {error}")
         # This is a fatal error; we should stop retrying.
         # We notify the router by setting a special validation_error
         # Note: Ideally, the graph should have a "terminal_failure" state,
@@ -264,19 +268,19 @@ def plan_validator_node(state: AgentState) -> dict:
         return {"validation_error": state.get("validation_error", "False, Planner node failed to generate valid JSON.")}
     if "solution" not in plan_json:
         error = "False, Plan JSON missing 'solution' key."
-        logger.info("Validation Failed: {error} ")
+        logger.info(f"Validation Failed: {error}")
         return {"validation_error": error}
     
     adsorbate_type = plan_json.get("adsorbate_type")
     if adsorbate_type not in ["Molecule", "ReactiveSpecies"]:
         error = f"False, Plan JSON missing or invalid `adsorbate_type` field (must be 'Molecule' or 'ReactiveSpecies')."
-        logger.info("Validation Failed: {error} ")
+        logger.info(f"Validation Failed: {error}")
         return {"validation_error": error}
 
     solution = plan_json.get("solution", {})
     if not solution:
         error = "False, Plan JSON missing or malformed ('solution' key is empty)."
-        logger.info("Validation Failed: {error} ")
+        logger.info(f"Validation Failed: {error}")
         return {"validation_error": error}
     if solution.get("action") == "terminate":
         logger.error("Planner decided to terminate (converged or no more plans)")
@@ -287,40 +291,40 @@ def plan_validator_node(state: AgentState) -> dict:
     ads_indices = solution.get("adsorbate_binding_indices", [])
     if site_type == "ontop" and len(ads_indices) != 1:
         error = f"False, Rule 2: Python check failed. site_type 'ontop' must pair with 1 index (end-on), but got {len(ads_indices)}."
-        logger.info("Validation Failed: {error} ")
+        logger.info(f"Validation Failed: {error}")
         return {"validation_error": error}
     if site_type == "bridge" and len(ads_indices) not in [1, 2]:
         error = f"False, Rule 2: Python check failed. site_type 'bridge' must pair with 1 (end-on) or 2 (side-on) indices, but got {len(ads_indices)}."
-        logger.info("Validation Failed: {error} ")
+        logger.info(f"Validation Failed: {error}")
         return {"validation_error": error}
     if site_type == "hollow" and len(ads_indices) not in [1, 2]:
         error = f"False, Rule 2: Python check failed. site_type 'hollow' must pair with 1 (end-on) or 2 (side-on) indices, but got {len(ads_indices)}."
-        logger.info("Validation Failed: {error} ")
+        logger.info(f"Validation Failed: {error}")
         return {"validation_error": error}
     if not isinstance(surf_atoms, list):
         error = "False, Plan JSON field 'surface_binding_atoms' must be a list."
-        logger.info("Validation Failed: {error} ")
+        logger.info(f"Validation Failed: {error}")
         return {"validation_error": error}
     if site_type == "ontop" and len(surf_atoms) != 1:
         error = (
             "False, Rule 2b: 'ontop' site requires surface_binding_atoms length of 1, "
             f"but got {len(surf_atoms)}."
         )
-        logger.info("Validation Failed: {error} ")
+        logger.info(f"Validation Failed: {error}")
         return {"validation_error": error}
     if site_type == "bridge" and len(surf_atoms) not in [1, 2]:
         error = (
             "False, Rule 2b: 'bridge' site requires surface_binding_atoms length of 1 or 2, "
             f"but got {len(surf_atoms)}."
         )
-        logger.info("Validation Failed: {error} ")
+        logger.info(f"Validation Failed: {error}")
         return {"validation_error": error}
     if site_type == "hollow" and len(surf_atoms) < 3:
         error = (
             "False, Rule 2b: 'hollow' site requires surface_binding_atoms to have at least 3 elements, "
             f"but got {len(surf_atoms)}."
         )
-        logger.info("Validation Failed: {error} ")
+        logger.info(f"Validation Failed: {error}")
         return {"validation_error": error}
     
     try:
@@ -333,10 +337,10 @@ def plan_validator_node(state: AgentState) -> dict:
                 "False, This plan has already been attempted in the (site_type, surface_binding_atoms, adsorbate_binding_indices) space. "
                 "Please plan a different combination."
             )
-            logger.info("Validation Failed: {error} ")
+            logger.info(f"Validation Failed: {error}")
             return {"validation_error": error}
     except Exception as e_dup:
-        logger.warning("Exception during Duplicate-check: {e_dup}")
+        logger.warning(f"Exception during Duplicate-check: {e_dup}")
 
     logger.info("Validation Succeeded ")
     return {"validation_error": None}
@@ -345,12 +349,23 @@ def tool_executor_node(state: AgentState) -> dict:
     """ Node 4: Tool Executor """
     print("--- 🛠️ Calling Tool Executor Node ---")
     
+    # Set random seeds for reproducibility if specified
+    random_seed = state.get("random_seed")
+    if random_seed is not None:
+        import random
+        random.seed(random_seed)
+        np.random.seed(random_seed)
+        torch.manual_seed(random_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(random_seed)
+        logger.info(f"Random seed set to {random_seed} for reproducibility")
+    
     plan_json = state.get("plan", {})
     plan_solution = plan_json.get("solution", {})
 
     if not plan_solution:
         error_message = "Tool Executor Failed: 'plan' missing 'solution' dictionary."
-        logger.error("{error_message}")
+        logger.error(f"{error_message}")
         return {
             "messages": [ToolMessage(content=error_message, tool_call_id="tool_executor")],
             "analysis_json": json.dumps({"status": "error", "message": error_message})
@@ -483,7 +498,8 @@ def tool_executor_node(state: AgentState) -> dict:
         logger.info("Starting structure relaxation...")
         slab_indices = list(range(len(final_slab_atoms)))
         relax_n = plan_solution.get("relax_top_n", 1)
-        print(f"--- 🛠️ Using {backend.name} backend on device: {calc_config.device} ---")
+        relaxation_mode = state.get("relaxation_mode", "fast")
+        print(f"--- 🛠️ Using {backend.name} backend on device: {calc_config.device} (relaxation_mode={relaxation_mode}) ---")
 
         final_traj_file = relax_atoms(
             atoms_list=list(initial_conformers),
@@ -495,8 +511,9 @@ def tool_executor_node(state: AgentState) -> dict:
             steps=opt_steps,
             md_steps=md_steps,
             md_temp=md_temp,
+            relaxation_mode=relaxation_mode,
         )
-        tool_logs.append(f"Success: Structure relaxation complete (Relaxed Top {relax_n}). Trajectory saved to '{final_traj_file}'.")
+        tool_logs.append(f"Success: Structure relaxation complete (Relaxed Top {relax_n}, Mode: {relaxation_mode}). Trajectory saved to '{final_traj_file}'.")
         
         # 9. Analyze Results
         logger.info("Calling Analysis Tool...")
@@ -510,7 +527,7 @@ def tool_executor_node(state: AgentState) -> dict:
             e_adsorbate_ref=E_adsorbate
         )
         tool_logs.append(f"Success: Analysis tool executed.")
-        logger.info("Analysis Result: {analysis_json_str}")
+        logger.info(f"Analysis Result: {analysis_json_str}")
         analysis_json = json.loads(analysis_json_str)
 
         if analysis_json.get("status") == "success":
@@ -543,7 +560,7 @@ def tool_executor_node(state: AgentState) -> dict:
 
     except Exception as e:
         error_message = str(e)
-        logger.error("Tool Execution Failed: {error_message}")
+        logger.error(f"Tool Execution Failed: {error_message}")
         tool_logs.append(f"Error during tool execution: {error_message}")
         analysis_json = {"status": "error", "message": f"Tool execution failed: {error_message}"}
         
@@ -844,7 +861,9 @@ def _prepare_initial_state(
     api_key: str,
     session_id: str,
     llm_backend: str = None,
-    llm_config: dict = None
+    llm_config: dict = None,
+    random_seed: int = None,
+    relaxation_mode: str = "fast"
 ) -> AgentState:
     """
     Prepare initial agent state with session isolation.
@@ -857,12 +876,16 @@ def _prepare_initial_state(
         session_id: UUID for file path isolation
         llm_backend: LLM backend name ("google", "openrouter", "ollama", "huggingface")
         llm_config: Optional LLM configuration overrides
+        random_seed: Optional random seed for reproducible runs (None = not fixed)
+        relaxation_mode: "fast" (all slab fixed) or "standard" (bottom 1/3 fixed)
     """
     return {
         "session_id": session_id,
         "api_key": api_key,
         "llm_backend": llm_backend or os.environ.get("ADSKRK_LLM_BACKEND", DEFAULT_LLM_BACKEND),
         "llm_config": llm_config,
+        "random_seed": random_seed,
+        "relaxation_mode": relaxation_mode,
         "smiles": smiles,
         "slab_path": slab_path,
         "surface_composition": None,
@@ -883,6 +906,9 @@ def parse_args():
     parser.add_argument("--smiles", type=str, required=True, help="SMILES string.")
     parser.add_argument("--slab_path", type=str, required=True, help="Path to the slab structure file (XYZ, CIF, PDB, SDF, MOL, POSCAR).")
     parser.add_argument("--user_request", type=str, default="Find a stable adsorption configuration.", help="User's request.")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducible runs.")
+    parser.add_argument("--relaxation-mode", type=str, choices=["fast", "standard"], default="fast",
+                        help="Surface relaxation mode: 'fast' (all slab fixed) or 'standard' (bottom 1/3 fixed)")
     return parser.parse_args()
 
 def main_cli():
@@ -901,17 +927,24 @@ def main_cli():
     from src.utils.config import get_llm_backend_name as get_backend_name
     llm_backend = get_backend_name()
     
+    # Get relaxation mode from args
+    relaxation_mode = getattr(args, 'relaxation_mode', 'fast')
+    
     initial_state = _prepare_initial_state(
         smiles=args.smiles, 
         slab_path=args.slab_path, 
         user_request=args.user_request,
         api_key=api_key,
         session_id=session_id,
-        llm_backend=llm_backend
+        llm_backend=llm_backend,
+        random_seed=args.seed,
+        relaxation_mode=relaxation_mode
     )
     
     agent_executor = get_agent_executor()
-    print(f"\n--- 🚀 Adsorb-Agent Started (Backend: {llm_backend}) ---\n")
+    seed_info = f", Seed: {args.seed}" if args.seed is not None else ""
+    mode_info = f", Mode: {relaxation_mode}"
+    print(f"\n--- 🚀 Adsorb-Agent Started (Backend: {llm_backend}{seed_info}{mode_info}) ---\n")
     final_state = None
 
     config = {"recursion_limit": 50}
