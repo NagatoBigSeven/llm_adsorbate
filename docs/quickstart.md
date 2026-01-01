@@ -65,7 +65,7 @@ The app will open in your browser at `http://localhost:8501`.
 
 | Input | Description | Example |
 |-------|-------------|---------|
-| **SMILES** | Molecule structure | `O=C=O`, `O`, `CO` |
+| **SMILES** | Molecule/ReactiveSpecies | `O=C=O`, `O`, `CO` |
 | **Slab File** | Surface structure file | Upload XYZ, CIF, or POSCAR |
 | **Query** | What you want to find | "Find the most stable adsorption site" |
 

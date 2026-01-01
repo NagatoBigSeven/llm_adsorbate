@@ -77,7 +77,7 @@ Access multiple AI providers through a unified API.
 
 **Available Models:**
 
-- `google/gemini-3-pro`
+- `google/gemini-3-pro-preview`
 - `openai/gpt-5.2-pro`
 - `anthropic/claude-opus-4.5`
 - Any model from [OpenRouter's catalog](https://openrouter.ai/models)

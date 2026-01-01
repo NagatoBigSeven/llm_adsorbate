@@ -68,7 +68,7 @@ LLM_BACKEND_DESCRIPTIONS = {
 # Default models for each backend
 DEFAULT_MODELS = {
     "google": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"],
-    "openrouter": ["google/gemini-2.5-pro", "openai/gpt-4o", "anthropic/claude-3.5-sonnet"],
+    "openrouter": ["google/gemini-3-pro-preview", "openai/gpt-5.2-pro", "anthropic/claude-4.5-opus"],
     "ollama": [],  # Will be populated dynamically
     "huggingface": ["Qwen/Qwen3-8B"],
 }
@@ -116,12 +116,13 @@ if is_cloud_backend(selected_backend):
     else:
         st.sidebar.caption(f"✏️ Enter your API Key")
     
-    # API key input field
+    # API key input field (disabled when from environment variable)
     api_key_input = st.sidebar.text_input(
         "API Key", 
         value=saved_key or "",
         type="password", 
         key=f"{selected_backend}_api_key",
+        disabled=env_key_active,  # Lock input when from env var
         help=f"Get your key from {'Google AI Studio' if selected_backend == 'google' else 'openrouter.ai'}"
     )
     
@@ -162,6 +163,10 @@ else:
     if selected_backend == "ollama":
         import requests
         ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+        
+        # Refresh button for Ollama models
+        if st.sidebar.button("🔄 Refresh Models", key="ollama_refresh"):
+            st.rerun()
         
         # Check if Ollama is running
         try:
@@ -275,17 +280,39 @@ structure_file = st.sidebar.file_uploader(
 )
 user_query = st.sidebar.text_area("User Query", value="")
 
+# Determine if Run button should be enabled
+missing_requirements = []
+if is_cloud_backend(selected_backend) and not api_key_input:
+    missing_requirements.append("API Key")
+if not smiles_input:
+    missing_requirements.append("SMILES")
+if not structure_file:
+    missing_requirements.append("Slab file")
+
+can_run = len(missing_requirements) == 0
+
 # Action buttons
 st.sidebar.markdown("---")
 col1, col2 = st.sidebar.columns(2)
 with col1:
-    run_button = st.button("▶️ Run", use_container_width=True, type="primary")
+    run_button = st.button("▶️ Run", use_container_width=True, type="primary", disabled=not can_run)
 with col2:
     clear_button = st.button("🗑️ Clear", use_container_width=True)
 
-# Handle clear button
+# Show missing requirements hint
+if not can_run:
+    st.sidebar.caption(f"⚠️ Missing: {', '.join(missing_requirements)}")
+
+# Handle clear button - reset ALL session state to defaults
 if clear_button:
-    st.session_state.messages = []
+    # Keys to preserve (backend-related settings that shouldn't be cleared)
+    preserve_keys = set()
+    
+    # Clear all session state except preserved keys
+    keys_to_delete = [key for key in st.session_state.keys() if key not in preserve_keys]
+    for key in keys_to_delete:
+        del st.session_state[key]
+    
     st.rerun()
 
 if "messages" not in st.session_state:
@@ -296,116 +323,108 @@ for message in st.session_state.messages:
         render_message(message["content"])
 
 if run_button:
-    # Validate inputs based on selected backend
-    if is_cloud_backend(selected_backend) and not api_key_input:
-        st.sidebar.error(f"Please enter your {selected_backend.capitalize()} API Key.")
-    elif not smiles_input:
-        st.sidebar.error("Please enter a SMILES string.")
-    elif not structure_file:
-        st.sidebar.error("Please upload a slab structure file.")
-    else:
-        # Preserve original file extension for ASE format auto-detection
-        file_ext = Path(structure_file.name).suffix.lower() or ".xyz"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext, mode='w') as tmp_file:
-            file_content = structure_file.getvalue().decode('utf-8')
-            tmp_file.write(file_content)
-            tmp_file_path = tmp_file.name
+    # Preserve original file extension for ASE format auto-detection
+    file_ext = Path(structure_file.name).suffix.lower() or ".xyz"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext, mode='w') as tmp_file:
+        file_content = structure_file.getvalue().decode('utf-8')
+        tmp_file.write(file_content)
+        tmp_file_path = tmp_file.name
+    
+    try:
+        # Generate unique session ID for file isolation
+        session_id = str(uuid.uuid4())[:8]  # First 8 chars for brevity
         
-        try:
-            # Generate unique session ID for file isolation
-            session_id = str(uuid.uuid4())[:8]  # First 8 chars for brevity
-            
-            # Display model being used
-            model_display = llm_config.get("model", "default")
-            
-            initial_state = _prepare_initial_state(
-                smiles=smiles_input, 
-                slab_path=tmp_file_path, 
-                user_request=user_query,
-                api_key=api_key_input,  # May be None for local backends
-                session_id=session_id,
-                llm_backend=selected_backend,
-                llm_config=llm_config,
-                random_seed=random_seed,
-                relaxation_mode=relaxation_mode
-            )
-            
-            # User message with full configuration
-            seed_display = random_seed if random_seed else "random"
-            config_summary = f"**Inputs:**\n- SMILES: `{smiles_input}`\n- Structure: `{structure_file.name}`\n- Query: `{user_query}`\n\n**Config:**\n- Backend: `{LLM_BACKEND_LABELS[selected_backend]}`\n- Model: `{model_display}`\n- Relaxation: `{relaxation_mode}`\n- Seed: `{seed_display}`"
-            st.session_state.messages.append({"role": "user", "content": config_summary})
-            with st.chat_message("user"):
-                st.markdown(config_summary)
+        # Display model being used
+        model_display = llm_config.get("model", "default")
+        
+        initial_state = _prepare_initial_state(
+            smiles=smiles_input, 
+            slab_path=tmp_file_path, 
+            user_request=user_query,
+            api_key=api_key_input,  # May be None for local backends
+            session_id=session_id,
+            llm_backend=selected_backend,
+            llm_config=llm_config,
+            random_seed=random_seed,
+            relaxation_mode=relaxation_mode
+        )
+        
+        # User message with full configuration
+        seed_display = random_seed if random_seed else "random"
+        config_summary = f"**Inputs:**\n- SMILES: `{smiles_input}`\n- Structure: `{structure_file.name}`\n- Query: `{user_query}`\n\n**Config:**\n- Backend: `{LLM_BACKEND_LABELS[selected_backend]}`\n- Model: `{model_display}`\n- Relaxation: `{relaxation_mode}`\n- Seed: `{seed_display}`"
+        st.session_state.messages.append({"role": "user", "content": config_summary})
+        with st.chat_message("user"):
+            st.markdown(config_summary)
 
-            with st.chat_message("assistant"):
-                final_answer = ""
-                with st.status(f"🤖 {LLM_BACKEND_LABELS[selected_backend]} | Model: {model_display}", expanded=True) as status:
-                    MAX_STEPS = int(os.environ.get("AGENT_MAX_STEPS", "20"))
-                    step_count = 0
-                    recent_messages = []
-                    recent_tool_calls = []
+        with st.chat_message("assistant"):
+            final_answer = ""
+            with st.status(f"🤖 {LLM_BACKEND_LABELS[selected_backend]} | Model: {model_display}", expanded=True) as status:
+                MAX_STEPS = int(os.environ.get("AGENT_MAX_STEPS", "20"))
+                step_count = 0
+                recent_messages = []
+                recent_tool_calls = []
 
-                    for event in agent_executor.stream(
-                        initial_state,
-                        stream_mode="values",
-                    ):
-                        step_count += 1
-                        if step_count >= MAX_STEPS:
-                            status.markdown("⚠️ **WARNING: Reached maximum step limit. Terminating to prevent infinite loop.**")
-                            break
-                        if "tool_calls" in event:
-                            for tc in event["tool_calls"]:
-                                tool_sig = f"{tc['name']}:{str(tc['args'])}"
-                                # Check for repeated tool calls
-                                if recent_tool_calls.count(tool_sig) >= 3:
-                                    status.markdown("⚠️ **WARNING: Detected repeated tool calls. Possible loop.**")
-                                recent_tool_calls.append(tool_sig)
-                                if len(recent_tool_calls) > 10:
-                                    recent_tool_calls.pop(0)
-                                status.markdown(f"Calling tool: `{tc['name']}` with args: `{tc['args']}`")
+                for event in agent_executor.stream(
+                    initial_state,
+                    stream_mode="values",
+                ):
+                    step_count += 1
+                    if step_count >= MAX_STEPS:
+                        status.markdown("⚠️ **WARNING: Reached maximum step limit. Terminating to prevent infinite loop.**")
+                        break
+                    if "tool_calls" in event:
+                        for tc in event["tool_calls"]:
+                            tool_sig = f"{tc['name']}:{str(tc['args'])}"
+                            # Check for repeated tool calls
+                            if recent_tool_calls.count(tool_sig) >= 3:
+                                status.markdown("⚠️ **WARNING: Detected repeated tool calls. Possible loop.**")
+                            recent_tool_calls.append(tool_sig)
+                            if len(recent_tool_calls) > 10:
+                                recent_tool_calls.pop(0)
+                            status.markdown(f"Calling tool: `{tc['name']}` with args: `{tc['args']}`")
+                        status.divider()
+                    if "tool_output" in event:
+                        for to in event["tool_output"]:
+                            status.markdown(f"Tool output: `{to}`")
+                        status.divider()
+                    if "messages" in event:
+                        last_message = event["messages"][-1]
+                        if last_message.type == "ai" and last_message.content:
+                            content = last_message.content
+                            if content in recent_messages:
+                                status.markdown("⚠️ **WARNING: Detected repeated message content.**")
+                            recent_messages.append(content)
+                            if len(recent_messages) > 5:
+                                recent_messages.pop(0)
+                            render_message_in_status(content, status)
                             status.divider()
-                        if "tool_output" in event:
-                            for to in event["tool_output"]:
-                                status.markdown(f"Tool output: `{to}`")
-                            status.divider()
-                        if "messages" in event:
-                            last_message = event["messages"][-1]
-                            if last_message.type == "ai" and last_message.content:
-                                content = last_message.content
-                                if content in recent_messages:
-                                    status.markdown("⚠️ **WARNING: Detected repeated message content.**")
-                                recent_messages.append(content)
-                                if len(recent_messages) > 5:
-                                    recent_messages.pop(0)
-                                render_message_in_status(content, status)
-                                status.divider()
-                                final_answer = content
-                    
-                    status.update(label="Agent finished.", state="complete", expanded=False)
+                            final_answer = content
+                
+                status.update(label="Agent finished.", state="complete", expanded=False)
 
-                if final_answer:
-                    render_message(final_answer)
-                    st.session_state.messages.append({"role": "assistant", "content": final_answer})
-                else:
-                    st.warning("The agent did not produce a final answer.")
-            
+            if final_answer:
+                render_message(final_answer)
+                st.session_state.messages.append({"role": "assistant", "content": final_answer})
+            else:
+                st.warning("The agent did not produce a final answer.")
+        
+        os.remove(tmp_file_path)
+
+    except Exception as e:
+        st.error(f"An error occurred: {e}")
+        st.exception(e)
+        if 'tmp_file_path' in locals() and os.path.exists(tmp_file_path):
             os.remove(tmp_file_path)
-
-        except Exception as e:
-            st.error(f"An error occurred: {e}")
-            st.exception(e)
-            if 'tmp_file_path' in locals() and os.path.exists(tmp_file_path):
-                os.remove(tmp_file_path)
 
 st.sidebar.markdown("---")
 with st.sidebar.expander("ℹ️ Quick Start Guide"):
     st.markdown("""
     **1. Select LLM Backend**
     - Cloud: Google AI or OpenRouter (requires API key)
-    - Local: Ollama or HuggingFace (no API key)
+    - Local: Ollama or HuggingFace (no API key required)
     
     **2. Enter Inputs**
-    - SMILES: Molecule structure (e.g., `CO`, `H2O`)
+    - SMILES: Molecule/ReactiveSpecies (e.g., `CO` for `CH3OH`, `O` for `H2O`)
     - Slab File: Crystal surface structure
     - Query: What you want to calculate
     
