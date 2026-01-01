@@ -97,6 +97,7 @@ if selected_backend != saved_backend:
 api_key_input = None
 selected_model = None
 ollama_models = []
+hf_quantize = None  # Only used for HuggingFace backend
 
 if is_cloud_backend(selected_backend):
     st.sidebar.subheader("🔑 API Key")
@@ -146,14 +147,14 @@ if is_cloud_backend(selected_backend):
         use_custom_model = st.sidebar.checkbox("Use custom model", key="custom_model_toggle")
         if use_custom_model:
             selected_model = st.sidebar.text_input(
-                "Model name",
+                "Model Name",
                 value="google/gemini-2.5-pro",
                 help="Enter OpenRouter model path (e.g., openai/gpt-4o)"
             )
         else:
-            selected_model = st.sidebar.selectbox("Select model", model_options)
+            selected_model = st.sidebar.selectbox("Select Model", model_options)
     else:
-        selected_model = st.sidebar.selectbox("Select model", model_options)
+        selected_model = st.sidebar.selectbox("Select Model", model_options)
 
 else:
     # Local backends don't need API key
@@ -180,14 +181,14 @@ else:
                 if ollama_models:
                     st.sidebar.subheader("📦 Model")
                     selected_model = st.sidebar.selectbox(
-                        "Select model",
+                        "Select Model",
                         ollama_models,
                         index=0 if "qwen3:8b" not in ollama_models else ollama_models.index("qwen3:8b") if "qwen3:8b" in ollama_models else 0,
                         help="Models available on your Ollama server"
                     )
                 else:
                     st.sidebar.warning("No models found. Install with: `ollama pull qwen3:8b`")
-                    selected_model = st.sidebar.text_input("Model name", value="qwen3:8b")
+                    selected_model = st.sidebar.text_input("Model Name", value="qwen3:8b")
             else:
                 st.sidebar.warning("⚠️ Unexpected response from Ollama")
                 selected_model = "qwen3:8b"
@@ -210,10 +211,15 @@ else:
                 help="HuggingFace model ID or local path"
             )
         else:
-            selected_model = st.sidebar.selectbox("Select model", hf_models)
+            selected_model = st.sidebar.selectbox("Select Model", hf_models)
         
         # Quantization option
-        st.sidebar.caption("💡 For lower memory, set `HF_QUANTIZE=4bit`")
+        hf_quantize = st.sidebar.selectbox(
+            "Quantization",
+            options=["none", "4bit", "8bit"],
+            index=0,
+            help="4bit/8bit reduces memory usage. Requires bitsandbytes library."
+        )
 
 # --- Advanced Settings (Collapsible) ---
 with st.sidebar.expander("⚙️ Advanced Settings"):
@@ -264,12 +270,15 @@ llm_config = {
     "temperature": temperature,
     "max_tokens": max_tokens,
 }
+# Add HuggingFace-specific options
+if hf_quantize and hf_quantize != "none":
+    llm_config["quantize"] = hf_quantize
 # Clean up None values
 llm_config = {k: v for k, v in llm_config.items() if v is not None}
 
 
 st.sidebar.header("Inputs")
-smiles_input = st.sidebar.text_input("SMILES String")
+smiles_input = st.sidebar.text_input("Adsorbate SMILES")
 
 # Supported structure formats (ASE-compatible)
 SUPPORTED_STRUCTURE_FORMATS = ['xyz', 'cif', 'pdb', 'sdf', 'mol', 'poscar', 'vasp']
@@ -287,7 +296,7 @@ if is_cloud_backend(selected_backend) and not api_key_input:
 if not smiles_input:
     missing_requirements.append("SMILES")
 if not structure_file:
-    missing_requirements.append("Slab file")
+    missing_requirements.append("Slab Structure File")
 
 can_run = len(missing_requirements) == 0
 

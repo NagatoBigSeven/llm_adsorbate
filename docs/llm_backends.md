@@ -104,7 +104,7 @@ ollama serve
 **Configuration:**
 
 - `OLLAMA_HOST`: Server URL (default: `http://localhost:11434`)
-- `OLLAMA_MODEL`: Model name (default: `qwen3:8b`)
+- `OLLAMA_MODEL`: Model Name (default: `qwen3:8b`)
 
 ### HuggingFace Transformers
 

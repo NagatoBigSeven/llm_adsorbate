@@ -14,10 +14,10 @@ Setup:
     2. (Optional) For quantization: pip install bitsandbytes
     3. Set backend: ADSKRK_LLM_BACKEND=huggingface
 
-Environment variables:
-    - HF_MODEL: Model name/path (default: Qwen/Qwen3-8B)
-    - HF_DEVICE: Device selection (cuda, cpu, auto)
-    - HF_QUANTIZE: Quantization mode (4bit, 8bit, none)
+Environment Variables:
+    - HF_MODEL: Model Name/Path (default: Qwen/Qwen3-8B)
+    - HF_DEVICE: Device Selection (cuda, cpu, auto)
+    - HF_QUANTIZE: Quantization Mode (4bit, 8bit, none)
 """
 
 import os
