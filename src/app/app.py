@@ -68,7 +68,7 @@ LLM_BACKEND_DESCRIPTIONS = {
 # Default models for each backend
 DEFAULT_MODELS = {
     "google": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"],
-    "openrouter": ["google/gemini-3-pro-preview", "openai/gpt-5.2-pro", "anthropic/claude-4.5-opus"],
+    "openrouter": ["google/gemini-3-pro-preview", "openai/gpt-5.2-pro", "anthropic/claude-opus-4.5"],
     "ollama": [],  # Will be populated dynamically
     "huggingface": ["Qwen/Qwen3-8B"],
 }
@@ -206,7 +206,7 @@ else:
         use_custom_hf = st.sidebar.checkbox("Use custom model", key="custom_hf_toggle")
         if use_custom_hf:
             selected_model = st.sidebar.text_input(
-                "Model path",
+                "Model Path",
                 value="Qwen/Qwen3-8B",
                 help="HuggingFace model ID or local path"
             )

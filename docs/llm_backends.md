@@ -166,7 +166,7 @@ llm = backend.get_chat_model(config)
 
 ### HuggingFace Out of Memory
 
-**Solution:** Enable quantization:
+**Solution:** Enable quantization in the UI (select 4bit or 8bit in the Quantization dropdown) or via environment variable:
 
 ```bash
 export HF_QUANTIZE=4bit

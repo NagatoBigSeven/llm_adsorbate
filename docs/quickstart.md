@@ -112,7 +112,7 @@ The agent will:
 - **Start simple**: Use small molecules like CO2, H2O, or CH4
 - **Be specific**: Clear queries get better results
 - **Check status**: The agent shows its reasoning in real-time
-- **Use Clear button**: Reset conversation between experiments
+- **Use Clear button**: Reset conversation and all settings between experiments
 
 ## Next Steps
 
