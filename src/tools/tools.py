@@ -959,7 +959,15 @@ def populate_surface_with_fragment(
     s.site_df = site_df_filtered
     site_index_arg = list(s.site_df.index)
     
-    print(f"--- 🛠️ Plan Verified: Searching {len(site_index_arg)} '{site_type}' (filtered) sites. ---")
+    # --- Intelligent Site Sampling ---
+    # Without sym_reduce, we may have many equivalent sites. Sample to limit computation.
+    MAX_SITES_PER_TYPE = 8  # Balance between coverage and computation time
+    if len(site_index_arg) > MAX_SITES_PER_TYPE:
+        import random
+        print(f"--- 🎲 Site Sampling: {len(site_index_arg)} sites found, sampling {MAX_SITES_PER_TYPE} for efficiency... ---")
+        site_index_arg = random.sample(site_index_arg, MAX_SITES_PER_TYPE)
+    
+    print(f"--- 🛠️ Plan Verified: Searching {len(site_index_arg)} '{site_type}' sites. ---")
 
     if len(site_index_arg) == 0:
         raise ValueError(f"No sites of type '{site_type}' containing {allowed_symbols} found. Cannot proceed.")
