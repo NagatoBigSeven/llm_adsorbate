@@ -966,6 +966,8 @@ def populate_surface_with_fragment(
         import random
         print(f"--- 🎲 Site Sampling: {len(site_index_arg)} sites found, sampling {MAX_SITES_PER_TYPE} for efficiency... ---")
         site_index_arg = random.sample(site_index_arg, MAX_SITES_PER_TYPE)
+        # CRITICAL: Also update s.site_df to match - autoadsorbate uses this internally
+        s.site_df = s.site_df.loc[site_index_arg]
     
     print(f"--- 🛠️ Plan Verified: Searching {len(site_index_arg)} '{site_type}' sites. ---")
 
