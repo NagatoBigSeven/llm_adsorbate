@@ -514,8 +514,13 @@ def analyze_surface_sites(slab_path: str) -> dict:
     clean_slab, _ = prepare_slab(atoms)
     
     # Dry run Autoadsorbate
+    logger.info("Starting surface site analysis...")
+    print("--- 🔍 [Site Analysis] Scanning surface for adsorption sites... ---")
     s = Surface(clean_slab, precision=1.0, touch_sphere_size=2.0, mode='slab')
-    s.sym_reduce()
+    # NOTE: sym_reduce() removed due to O(n²) performance issue on large surfaces.
+    # Site types are still deduplicated via set in site_inventory below.
+    # s.sym_reduce()
+    print(f"--- ✅ [Site Analysis] Found {len(s.site_df)} sites. ---")
     
     site_inventory = defaultdict(set)
     for _, row in s.site_df.iterrows():
@@ -893,8 +898,9 @@ def populate_surface_with_fragment(
     )
 
     original_site_count = len(s.site_df)
-    s.sym_reduce()
-    print(f"--- 🛠️ Surface Sites: Reduced from {original_site_count} to {len(s.site_df)} inequivalent sites. ---")
+    # NOTE: sym_reduce() removed due to O(n²) performance issue on large surfaces.
+    # s.sym_reduce()
+    print(f"--- 🛠️ Surface Sites: {original_site_count} sites found. ---")
 
     # Check if sites were found
     # This prevents failure on s.site_df.connectivity

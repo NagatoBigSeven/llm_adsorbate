@@ -368,6 +368,9 @@ if run_button:
         with st.chat_message("assistant"):
             final_answer = ""
             with st.status(f"🤖 {LLM_BACKEND_LABELS[selected_backend]} | Model: {model_display}", expanded=True) as status:
+                # Show initial loading message (visible while pre-processing runs)
+                status.markdown("⏳ **Initializing...** Analyzing surface structure and preparing agent...")
+                
                 MAX_STEPS = int(os.environ.get("AGENT_MAX_STEPS", "20"))
                 step_count = 0
                 recent_messages = []

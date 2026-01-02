@@ -916,16 +916,18 @@ def main_cli():
     if not os.path.exists('./outputs'):
         os.makedirs('./outputs')
     
-    # Get API key from environment or config
-    api_key, _ = get_api_key()
+    # Get LLM backend from environment or config (need this first to get correct API key)
+    from src.utils.config import get_llm_backend_name as get_backend_name, get_api_key_for_backend
+    llm_backend = get_backend_name()
+    
+    # Get API key for the specific backend
+    api_key, key_source = get_api_key_for_backend(llm_backend)
+    if key_source:
+        logger.info(f"API key loaded from {key_source} for backend: {llm_backend}")
     
     # Generate session ID for file isolation
     import uuid
     session_id = str(uuid.uuid4())[:8]
-    
-    # Get LLM backend from environment or config
-    from src.utils.config import get_llm_backend_name as get_backend_name
-    llm_backend = get_backend_name()
     
     # Get relaxation mode from args
     relaxation_mode = getattr(args, 'relaxation_mode', 'fast')
